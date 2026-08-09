@@ -26,6 +26,7 @@ void timer_init(void) {
     g_timers[TIMER_EXTRACT].name  = "掩码→坐标提取";
     g_timers[TIMER_FRONTIER].name = "前沿计算";
     g_timers[TIMER_GROW].name     = "扩展+构造掩码";
+    g_timers[TIMER_INVARIANT].name = "不变量预筛选";
     g_timers[TIMER_CANONICAL].name = "One-sided 规范化";
     g_timers[TIMER_HOLE].name     = "Flood fill 洞检测";
     g_timers[TIMER_HASHSET].name  = "哈希集合插入";

@@ -21,6 +21,7 @@ enum {
     TIMER_EXTRACT,         /* 掩码 → 坐标提取 */
     TIMER_FRONTIER,        /* 前沿计算 */
     TIMER_GROW,            /* 扩展格子 + 构造新掩码 */
+    TIMER_INVARIANT,       /* 不变量计算 + 预筛选 */
     TIMER_CANONICAL,       /* One-sided 规范化（4 旋转 + 规范化） */
     TIMER_HOLE,            /* Flood fill 洞检测 */
     TIMER_HASHSET,         /* 哈希集合插入（含扩容） */

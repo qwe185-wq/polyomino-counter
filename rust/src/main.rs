@@ -33,6 +33,9 @@ struct Args {
     /// 使用 Redelmeier DFS (实验性)
     #[arg(long)]
     dfs: bool,
+    /// 使用 Jensen 转移矩阵法
+    #[arg(long)]
+    jensen: bool,
 }
 
 fn main() {
@@ -50,7 +53,10 @@ fn main() {
 
     let total_start = Instant::now();
 
-    let results = if args.dfs {
+    let results = if args.jensen {
+        println!("── Jensen 转移矩阵法 ──");
+        crate::jensen::enumerate_jensen(max_n, args.verbose)
+    } else if args.dfs {
         println!("── Redelmeier DFS 枚举 ──");
         crate::redelmeier::enumerate_redelmeier(max_n, args.verbose)
     } else {

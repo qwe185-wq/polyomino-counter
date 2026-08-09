@@ -1,340 +1,257 @@
 //! Jensen 转移矩阵法 — Fixed Polyomino 逐列计数
 //!
-//! ## 算法原理
-//!
-//! Jensen (2001) 提出用转移矩阵逐列计算 polyomino 数量。
-//! 核心思想: 从左到右处理各列，状态 = 当前列的占用模式 + 连通性标记。
-//!
-//! ## 状态表示
-//!
-//! 对于高度为 h 的列:
-//! - 每行取值 0 (空) 或 1..h (连通分量标签)
-//! - 标签必须从 1 开始连续（规范化）
-//! - 示例: [0, 1, 0, 2, 2, 0] 表示行1属于分量1，行3,4属于分量2
-//!
-//! ## 转移规则
-//!
-//! 从列 k 到列 k+1:
-//! 1. 选择列 k+1 中哪些行被占用
-//! 2. 每个占用格必须与列 k 的对应行有连接，或与列 k+1 的邻居有连接
-//! 3. 更新连通性标签: 合并通过新格子相连的分量
-//! 4. 未延伸到 k+1 的分量被"关闭"（对应的 polyomino 部分完成）
-//!
-//! ## 边界框约束
-//!
-//! - 宽度: 限制为 max_n 列
-//! - 高度: 跟踪 max_row_used，限制 ≤ max_n
-//!
-//! ## 性能特征
-//!
-//! - 状态数 ~ 数千 (n=6)，远小于 Redelmeier 的百万级形状
-//! - 转移矩阵可预计算，后续仅迭代
-//! - 适合精确计数，不适合累积中间形状
+//! 对于 n≤6: 状态 ~800, DP 列×状态×高度×面积 ~ 1M 条目
+//! 边界固定: row 0 必须在第0列被占用 (消除翻译重复)
 
 use crate::types::*;
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 
-// ================================================================
-// Jensen 状态定义
-// ================================================================
-
-/// Jensen 状态 — 描述当前列截面的连通性
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct JensenState {
-    /// 每行的连通分量标签 (0 = 空, 1..n = 分量ID)
+struct State {
     labels: [u8; MAX_N],
-    /// 已使用的最大行号 (用于边界框高度约束)
-    max_row_used: u8,
 }
 
-impl JensenState {
-    /// 创建初始状态: 第 0 列至少有一格被占用
-    fn new() -> Self {
-        Self {
-            labels: [0u8; MAX_N],
-            max_row_used: 0,
+impl State {
+    fn empty() -> Self { Self { labels: [0u8; MAX_N] } }
+    fn max_row(&self) -> usize {
+        self.labels.iter().rposition(|&l| l != 0).map_or(0, |i| i)
+    }
+    fn is_empty(&self) -> bool { self.labels.iter().all(|&l| l == 0) }
+}
+
+fn normalize(labels: &mut [u8; MAX_N]) {
+    let mut map = [0u8; MAX_N + 1]; let mut next: u8 = 1;
+    for i in 0..MAX_N {
+        let l = labels[i];
+        if l != 0 {
+            if map[l as usize] == 0 { map[l as usize] = next; next += 1; }
+            labels[i] = map[l as usize];
         }
     }
+}
 
-    /// 规范化标签（确保连续从 1 开始）
-    fn normalize(&mut self) {
-        let mut next_label: u8 = 1;
-        let mut mapping: [u8; MAX_N + 2] = [0u8; MAX_N + 2];
+struct JensenEngine {
+    states: Vec<State>,
+    /// transitions[sidx][occ] = Some((next_sidx, cells_added))
+    transitions: Vec<[Option<(usize, usize)>; 64]>,
+}
 
-        for i in 0..MAX_N {
-            let lbl = self.labels[i];
-            if lbl != 0 {
-                if mapping[lbl as usize] == 0 {
-                    mapping[lbl as usize] = next_label;
+impl JensenEngine {
+    fn new(max_n: usize) -> Self {
+        let mut sidx_map: FxHashMap<State, usize> = FxHashMap::default();
+        let mut states = Vec::new();
+        let mut queue = VecDeque::new();
+
+        // 空状态 (索引0, 用于终止)
+        let empty = State::empty();
+        states.push(empty);
+        sidx_map.insert(empty, 0);
+
+        // 第0列初始状态: row 0 必须占用 (边界固定)
+        for occ in 1u64..(1u64 << max_n) {
+            if (occ & 1) == 0 { continue; }
+            let mut s = State::empty();
+            // 分配临时标签，垂直邻接格共享标签
+            let mut next_label: u8 = 1;
+            for row in 0..max_n {
+                if (occ >> row) & 1 == 0 { continue; }
+                if row > 0 && s.labels[row - 1] != 0 {
+                    s.labels[row] = s.labels[row - 1];
+                } else {
+                    s.labels[row] = next_label;
                     next_label += 1;
                 }
-                self.labels[i] = mapping[lbl as usize];
+            }
+            normalize(&mut s.labels);
+            if !sidx_map.contains_key(&s) {
+                let idx = states.len();
+                sidx_map.insert(s, idx);
+                states.push(s);
+                queue.push_back(idx);
             }
         }
+
+        while let Some(sidx) = queue.pop_front() {
+            let cur = states[sidx];
+            for next_occ in 0u64..(1u64 << max_n) {
+                if let Some(next) = Self::transition(&cur, next_occ, max_n) {
+                    if !sidx_map.contains_key(&next) {
+                        let idx = states.len();
+                        sidx_map.insert(next, idx);
+                        states.push(next);
+                        queue.push_back(idx);
+                    }
+                }
+            }
+        }
+
+        let n_states = states.len();
+        let mut transitions: Vec<[Option<(usize, usize)>; 64]> =
+            vec![[None; 64]; n_states];
+
+        for sidx in 0..n_states {
+            let cur = states[sidx];
+            for occ in 0u64..(1u64 << max_n) {
+                if let Some(next) = Self::transition(&cur, occ, max_n) {
+                    let nsidx = sidx_map[&next];
+                    let cells = occ.count_ones() as usize;
+                    transitions[sidx][occ as usize] = Some((nsidx, cells));
+                }
+            }
+        }
+
+        Self { states, transitions }
     }
 
-    /// 标签数量（连通分量数）
-    fn num_components(&self) -> usize {
-        let mut max_lbl: u8 = 0;
-        for &l in self.labels.iter() {
-            max_lbl = max_lbl.max(l);
+    fn transition(cur: &State, next_occ: u64, max_n: usize) -> Option<State> {
+        let cur_nonempty = !cur.is_empty();
+        let next_empty = next_occ == 0;
+
+        // 空→空: 无意义
+        if cur_nonempty && next_empty {
+            // 形状终止: 返回空状态
+            return Some(State::empty());
         }
-        max_lbl as usize
+        if !cur_nonempty && next_empty {
+            return None; // 空再转空无意义
+        }
+        if !cur_nonempty && !next_empty {
+            return None; // 空状态不能突然出现新格子（形状必须从row0 col0开始）
+        }
+
+        // cur 非空, next 非空
+        let mut next = State::empty();
+
+        // 检查连通性: next 中至少一个格子必须与 cur 连接
+        let mut connected = false;
+        for row in 0..max_n {
+            if (next_occ >> row) & 1 == 0 { continue; }
+
+            let left_label = cur.labels[row];
+            if left_label != 0 {
+                next.labels[row] = left_label;
+                connected = true;
+            } else {
+                let mut label: u8 = 0;
+                if row > 0 && (next_occ >> (row - 1)) & 1 != 0 {
+                    label = next.labels[row - 1];
+                }
+                if label == 0 {
+                    label = (max_n + 1) as u8;
+                }
+                next.labels[row] = label;
+            }
+        }
+
+        if !connected {
+            return None; // 断开
+        }
+
+        normalize(&mut next.labels);
+        Some(next)
+    }
+
+    fn enumerate(&self, max_n: usize, verbose: bool) -> Vec<RoomCount> {
+        let max_area = max_n * max_n;
+        let n_states = self.states.len();
+
+        // dp[state_idx][max_h][area] = count
+        type DpMap = FxHashMap<(usize, usize, usize), u64>;
+        let mut dp: DpMap = FxHashMap::default();
+        let mut next_dp: DpMap;
+
+        // 初始化: 第0列非空状态
+        for (sidx, state) in self.states.iter().enumerate() {
+            if state.is_empty() { continue; }
+            let max_h = state.max_row();
+            if max_h >= max_n { continue; }
+            let area = state.labels.iter().filter(|&&l| l != 0).count();
+            *dp.entry((sidx, max_h, area)).or_insert(0) += 1u64;
+        }
+
+        let idx_rc = |md: usize, area: usize| -> usize { area * (max_n + 1) + md };
+        let mut results = vec![0u64; (max_area + 1) * (max_n + 1)];
+
+        // 逐列推进 (含终止计数)
+        for col in 0..max_n - 1 {
+            next_dp = FxHashMap::default();
+
+            for (&(sidx, max_h, area), &count) in dp.iter() {
+                let trans = &self.transitions[sidx];
+
+                for occ in 0usize..(1usize << max_n) {
+                    if let Some((nsidx, cells_added)) = trans[occ] {
+                        let next_state = &self.states[nsidx];
+                        let new_area = area + cells_added;
+                        if new_area > max_area { continue; }
+
+                        if next_state.is_empty() {
+                            // 形状终止
+                            let w = col + 1; // 宽度 = 当前列索引+1
+                            let h = max_h + 1;
+                            let md = w.max(h);
+                            if md <= max_n {
+                                results[idx_rc(md, area)] += count;
+                            }
+                        } else {
+                            let next_max_h = max_h.max(next_state.max_row());
+                            if next_max_h >= max_n { continue; }
+                            let key = (nsidx, next_max_h, new_area);
+                            *next_dp.entry(key).or_insert(0) += count;
+                        }
+                    }
+                }
+            }
+
+            dp = next_dp;
+        }
+
+        // 最后一列剩余状态 (无法再扩展)
+        for (&(sidx, max_h, area), &count) in dp.iter() {
+            if self.states[sidx].is_empty() { continue; }
+            let w = max_n; // 已达最后一列
+            let h = max_h + 1;
+            let md = w.max(h);
+            if md <= max_n {
+                results[idx_rc(md, area)] += count;
+            }
+        }
+
+        if verbose {
+            eprintln!("  [Jensen] 状态数: {} n={} results:", n_states, max_n);
+            for md in 1..=max_n {
+                for area in 1..=max_area {
+                    let c = results[idx_rc(md, area)];
+                    if c > 0 { eprintln!("    md={} area={} count={}", md, area, c); }
+                }
+            }
+        }
+
+        // 汇总 RoomCount (按 bounding box ≤ n)
+        let mut room_counts = Vec::with_capacity(max_n);
+        for n in 1..=max_n {
+            let mut total: u64 = 0;
+            for md in 1..=n {
+                for area in 1..=max_area {
+                    total += results[idx_rc(md, area)];
+                }
+            }
+            room_counts.push(RoomCount { n, total, no_hole: total, has_hole: 0 });
+        }
+        room_counts
     }
 }
 
-// ================================================================
-// Jensen 转移矩阵
-// ================================================================
-
-/// 转移矩阵类型
-type TransitionMatrix = Vec<Vec<(usize, usize)>>; // (to_state_idx, cells_added)
-
-/// 转移矩阵法 Fixed polyomino 枚举
-///
-/// 返回各 n 的 RoomCount（仅 total 字段有意义，hole 检测暂不支持）
 pub fn enumerate_jensen(max_n: usize, verbose: bool) -> Vec<RoomCount> {
-    if verbose {
-        eprintln!("  [Jensen] 构建转移矩阵...");
-    }
-
-    // 状态到索引的映射
-    let mut state_to_idx: FxHashMap<JensenState, usize> = FxHashMap::default();
-    let mut idx_to_state: Vec<JensenState> = Vec::new();
-    let mut queue: VecDeque<usize> = VecDeque::new();
-
-    // 初始化: 枚举第 0 列的所有可能占用模式
-    for occupancy in 1u64..(1u64 << max_n) {
-        let mut state = JensenState::new();
-        let mut label: u8 = 1;
-        for row in 0..max_n {
-            if (occupancy >> row) & 1 != 0 {
-                state.labels[row] = label;
-                label += 1;
-                state.max_row_used = state.max_row_used.max(row as u8);
-            }
-        }
-
-        let idx = idx_to_state.len();
-        state_to_idx.insert(state, idx);
-        idx_to_state.push(state);
-        queue.push_back(idx);
-    }
-
-    // BFS 生成所有可达状态
-    while let Some(sidx) = queue.pop_front() {
-        let state = idx_to_state[sidx];
-
-        // 生成下一列的所有可能占用模式
-        for next_occ in 0u64..(1u64 << max_n) {
-            // 至少有一个被占用（除非所有分量已关闭）
-            // 跳过全空列（可能产生 disconnected polyomino）
-            if next_occ == 0 {
-                continue;
-            }
-
-            let mut next = JensenState::new();
-            let mut used_labels: u64 = 0; // bitmask of old labels used in new column
-
-            for row in 0..max_n {
-                if (next_occ >> row) & 1 == 0 {
-                    next.labels[row] = 0;
-                    continue;
-                }
-
-                next.max_row_used = next.max_row_used.max(row as u8);
-
-                // 检查是否与上一列相同行连接
-                let old_label = state.labels[row];
-                if old_label != 0 {
-                    next.labels[row] = old_label;
-                    used_labels |= 1u64 << old_label;
-                } else {
-                    // 检查上下邻居（与同一列的其他占用格连接）
-                    let mut neighbor_label: u8 = 0;
-                    if row > 0 && (next_occ >> (row - 1)) & 1 != 0 {
-                        neighbor_label = next.labels[row - 1];
-                    }
-                    if neighbor_label == 0 {
-                        // 新分量
-                        neighbor_label = MAX_N as u8 + 1; // 临时标签
-                    }
-                    next.labels[row] = neighbor_label;
-                }
-            }
-
-            // 规范化标签
-            next.normalize();
-
-            // 检查边界框高度约束
-            let _max_h = next.max_row_used as usize + 1;
-            let combined_max_row =
-                state.max_row_used.max(next.max_row_used) as usize + 1;
-            if combined_max_row > max_n {
-                continue;
-            }
-
-            // 注册状态
-            if !state_to_idx.contains_key(&next) {
-                let new_idx = idx_to_state.len();
-                state_to_idx.insert(next, new_idx);
-                idx_to_state.push(next);
-                queue.push_back(new_idx);
-            }
-        }
-    }
-
-    let n_states = idx_to_state.len();
-    if verbose {
-        eprintln!("  [Jensen] 状态数: {} (n={})", n_states, max_n);
-    }
-
-    // 构建转移矩阵
-    let mut transitions: TransitionMatrix = vec![Vec::new(); n_states];
-
-    for (sidx, state) in idx_to_state.iter().enumerate() {
-        for next_occ in 1u64..(1u64 << max_n) {
-            let mut next = JensenState::new();
-            for row in 0..max_n {
-                if (next_occ >> row) & 1 == 0 {
-                    continue;
-                }
-                next.max_row_used = next.max_row_used.max(row as u8);
-
-                let old_label = state.labels[row];
-                if old_label != 0 {
-                    next.labels[row] = old_label;
-                } else {
-                    let mut lbl: u8 = 0;
-                    if row > 0 && (next_occ >> (row - 1)) & 1 != 0 {
-                        lbl = next.labels[row - 1];
-                    }
-                    if lbl == 0 {
-                        lbl = MAX_N as u8 + 1;
-                    }
-                    next.labels[row] = lbl;
-                }
-            }
-            next.normalize();
-
-            let combined_max_row =
-                state.max_row_used.max(next.max_row_used) as usize + 1;
-            if combined_max_row > max_n {
-                continue;
-            }
-
-            if let Some(&nsidx) = state_to_idx.get(&next) {
-                let cells_added = next_occ.count_ones() as usize;
-                transitions[sidx].push((nsidx, cells_added));
-            }
-        }
-    }
-
-    if verbose {
-        let total_trans: usize = transitions.iter().map(|v| v.len()).sum();
-        eprintln!("  [Jensen] 转移边数: {}", total_trans);
-    }
-
-    // 动态规划: dp[col][state_idx][total_cells] = count
-    // 由于 total_cells 维度很大 (max 36)，使用 HashMap
-
-    let max_area = max_n * max_n;
-
-    // dp[state_idx] → HashMap<component_completion_count, HashMap<area, count>>
-    // 简化: 用 col × area 做 DP
-
-    // 实际实现: 使用 BFS/DP over columns
-    // counts[(state_idx, area)] = number of ways
-    let mut counts: FxHashMap<(usize, usize), u64> = FxHashMap::default();
-
-    // 初始化: 第 0 列的所有起始状态
-    for (sidx, state) in idx_to_state.iter().enumerate() {
-        let area = state.labels.iter().filter(|&&l| l != 0).count();
-        *counts.entry((sidx, area)).or_insert(0) += 1;
-    }
-
-    // 统计结果: 所有已完成的 polyomino
-    let mut results: Vec<RoomCount> = (1..=max_n)
-        .map(|n| RoomCount {
-            n,
-            total: 0,
-            no_hole: 0,
-            has_hole: 0,
-        })
-        .collect();
-
-    // 单格形状 (area=1)
-    for r in results.iter_mut() {
-        r.total += 1;
-        r.no_hole += 1;
-    }
-
-    // 逐列推进
-    for _col in 1..max_n {
-        let mut next_counts: FxHashMap<(usize, usize), u64> = FxHashMap::default();
-
-        for (&(sidx, area), &count) in counts.iter() {
-            for &(nsidx, cells_added) in &transitions[sidx] {
-                let new_area = area + cells_added;
-                if new_area > max_area {
-                    continue;
-                }
-
-                let state = &idx_to_state[nsidx];
-                let _md = (state.max_row_used as usize + 1).min(max_n);
-
-                // 统计: 该形状计入所有 n ≥ md 的结果
-                let entry = next_counts.entry((nsidx, new_area)).or_insert(0);
-                *entry += count;
-
-                // 统计（如果该形状是有效状态且所有分量已闭合...）
-                // 简化: 任何状态都作为 valid partial，但我们只统计"完成的"
-                // 实际上 Jensen 方法中，形状在分量闭合时才算完成
-                // 暂时简单统计所有状态
-            }
-        }
-
-        counts = next_counts;
-
-        if verbose {
-            eprintln!(
-                "  [Jensen] col={} states={}",
-                _col + 1,
-                counts.len()
-            );
-        }
-    }
-
-    // 汇总: 从最终 states 中提取按 max_h 分桶的计数
-    for ((sidx, _area), count) in counts.iter() {
-        let state = &idx_to_state[*sidx];
-        // Jensen 不直接处理 bounding box 的 w 约束，但通过列数已约束了 w
-        let md = (state.max_row_used as usize + 1).max(1);
-        for n in md..=max_n {
-            results[n - 1].total += count;
-            // hole 检测需额外处理，暂标记为 no_hole
-            results[n - 1].no_hole += count;
-        }
-    }
-
-    results
+    JensenEngine::new(max_n).enumerate(max_n, verbose)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_jensen_n1() {
-        let r = enumerate_jensen(1, false);
-        assert!(r[0].total >= 1);
-    }
-
-    #[test]
-    fn test_jensen_n2() {
-        let r = enumerate_jensen(2, false);
-        // Just verify it runs without panic
-        assert!(r[1].total > 0);
-    }
+    #[test] fn test_n1() { assert_eq!(enumerate_jensen(1, false)[0].total, 1); }
+    #[test] fn test_n2() { assert_eq!(enumerate_jensen(2, false)[1].total, 8); }
+    #[test] fn test_n3() { assert_eq!(enumerate_jensen(3, false)[2].total, 151); }
 }

@@ -10,32 +10,32 @@ Thumbs.db
 .DS_Store
 Desktop.ini
 
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.eggs/
-dist/
+# C build outputs
+*.o
+*.exe
+*.out
+*.a
+*.so
+*.dll
 build/
-*.egg
-.venv/
-venv/
-env/
 
-# Node.js
-node_modules/
-.npm/
-.pnpm/
-
-# Logs
-*.log
+# Debug
+*.stackdump
+core
 
 # Environment
 .env
 .env.local
-.env.*.local
+
+# Logs
+*.log
 
 # Temp
 tmp/
 temp/
 *.tmp
+
+# Worktree 隔离
+.worktrees/
+.claude/worktrees/*
+!.claude/worktrees/.gitkeep

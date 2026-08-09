@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage-1-boundary",
+  "title": "阶段 1 → 阶段 2/3/4 接口校验规范",
+  "description": "验证 project-planning 产出的当前计划、任务矩阵和阶段结果包含下游阶段需要的所有关键字段。在阶段 1 闸门通过前执行。",
+  "source": {
+    "type": "runtime_state",
+    "description": "阶段 1 strict gate 以当前 run 的 stage-1-result.json、计划文档和 task-matrix.json 为准；历史 docs/plans/*-plan.md 只能用于诊断。"
+  },
+  "checks": [
+    {
+      "id": "S1-STAGE_RESULT_CURRENT",
+      "description": "当前 run 的 stage-1-result.json 存在且 current/run_id 绑定正确",
+      "type": "artifact_current",
+      "artifactRole": "current_stage_1_result",
+      "fallbackGlob": "docs/.lifecycle/runs/*/skill-results/stage-1-result.json",
+      "consumer": "stage-2",
+      "severity": "blocker",
+      "fix": "运行 project-planning 输出当前 run 的 stage-1-result.json，并在 target_artifacts 中传入 current_stage_1_result"
+    },
+    {
+      "id": "S1-PLAN_CURRENT",
+      "description": "当前实施计划文档存在且属于本次 run，不能使用历史计划放行",
+      "type": "artifact_current",
+      "artifactRole": "current_plan",
+      "fallbackGlob": "docs/plans/*-plan.md",
+      "consumer": ["stage-2", "stage-3", "stage-4"],
+      "severity": "blocker",
+      "fix": "在 stage-1-result.json 中记录当前计划 artifact，并确保 run_id/current=true 匹配"
+    },
+    {
+      "id": "S1-TASK_MATRIX_CURRENT",
+      "description": "当前任务矩阵存在，包含稳定 task_id、需求覆盖、expected_result_path 和测试/接口字段",
+      "type": "artifact_current",
+      "artifactRole": "current_task_matrix",
+      "fallbackGlob": "docs/.lifecycle/runs/*/reports/task-matrix.json",
+      "consumer": "stage-3",
+      "severity": "blocker",
+      "fix": "生成 docs/.lifecycle/runs/<run_id>/reports/task-matrix.json，并在 stage-1-result.json 中记录 current=true、run_id 匹配"
+    },
+    {
+      "id": "S1-TASK_MATRIX_VALID",
+      "description": "任务矩阵逐项满足阶段 3 输入要求 — 每个需求有任务或 out_of_scope，每个任务有文件路径、接口/无接口说明、测试用例和 expected_result_path",
+      "type": "task_matrix_complete",
+      "taskMatrixArtifactRole": "current_task_matrix",
+      "mode": "planning_requirements",
+      "requiredTaskFields": ["task_id", "summary", "files", "interface", "test_cases", "expected_result_path"],
+      "requiredRequirementRule": "mapped_or_out_of_scope",
+      "consumer": "stage-3",
+      "severity": "blocker",
+      "fix": "补齐 task-matrix.json 中缺失的 task_id、files、interface、test_cases、expected_result_path 或需求 out_of_scope 说明"
+    },
+    {
+      "id": "S1-TECH_STACK",
+      "description": "技术栈章节 — 阶段 2 据此选择依赖和工具",
+      "type": "section_exists",
+      "pattern": "^## 技术栈",
+      "artifactRole": "current_plan",
+      "consumer": "stage-2",
+      "severity": "blocker",
+      "fix": "在当前计划文档中补充 '## 技术栈' 章节"
+    },
+    {
+      "id": "S1-GLOBAL_CONSTRAINTS",
+      "description": "全局约束章节 — 阶段 3 注入每个实施子 Agent",
+      "type": "section_exists",
+      "pattern": "^## 全局约束",
+      "artifactRole": "current_plan",
+      "consumer": "stage-3",
+      "severity": "blocker",
+      "fix": "在当前计划文档中补充 '## 全局约束' 章节"
+    },
+    {
+      "id": "S1-ARCHITECTURE",
+      "description": "架构设计章节（含目录结构）— 阶段 2 据此创建目录树",
+      "type": "section_exists",
+      "pattern": "^## 架构设计",
+      "artifactRole": "current_plan",
+      "consumer": "stage-2",
+      "severity": "blocker",
+      "fix": "在当前计划文档中补充 '## 架构设计' 章节"
+    },
+    {
+      "id": "S1-TASK_LIST",
+      "description": "任务列表章节 — 阶段 3 逐任务实施",
+      "type": "section_exists",
+      "pattern": "^## 任务列表",
+      "artifactRole": "current_plan",
+      "consumer": "stage-3",
+      "severity": "blocker",
+      "fix": "在当前计划文档中补充 '## 任务列表' 章节"
+    },
+    {
+      "id": "S1-NON_FUNCTIONAL",
+      "description": "非功能性需求章节 — 阶段 4 据此制定性能和安全测试策略",
+      "type": "section_exists",
+      "pattern": "^## 非功能性需求|^### 非功能性需求",
+      "artifactRole": "current_plan",
+      "consumer": "stage-4",
+      "severity": "blocker",
+      "fix": "在当前计划文档中补充非功能性需求章节"
+    }
+  ]
+}

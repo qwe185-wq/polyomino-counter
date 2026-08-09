@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage-3-boundary",
+  "title": "阶段 3 → 阶段 4 接口校验规范",
+  "description": "验证 iterative-development 产出的结构化任务结果、测试证据、审查结论和提交证据满足质量保障阶段入口条件。在阶段 3 闸门通过前执行。",
+  "source": {
+    "type": "runtime_state",
+    "description": "阶段 3 的放行依据是当前 run 的任务矩阵、task-N-result.json、stage-3-result.json 和 final-review.json；历史 task-briefs Markdown 只能作为人工诊断材料。"
+  },
+  "checks": [
+    {
+      "id": "S3-TASK_MATRIX_CURRENT",
+      "description": "当前 run 的任务矩阵存在且 current/run_id 绑定正确",
+      "type": "artifact_current",
+      "artifactRole": "current_task_matrix",
+      "fallbackGlob": "docs/.lifecycle/runs/*/reports/task-matrix.json",
+      "consumer": "stage-4",
+      "severity": "blocker",
+      "fix": "运行 project-planning 生成 docs/.lifecycle/runs/<run_id>/reports/task-matrix.json，并在 stage-1-result.json 中标记 current=true、run_id 匹配"
+    },
+    {
+      "id": "S3-ALL_PLANNED_TASKS_CLOSED",
+      "description": "计划任务逐项闭合 — 每个 task_id 都有 task-N-result.json，且包含实现、测试、审查和提交 SHA 证据",
+      "type": "task_matrix_complete",
+      "taskMatrixArtifactRole": "current_task_matrix",
+      "resultGlob": "docs/.lifecycle/runs/<run_id>/skill-results/task-*-result.json",
+      "requiredEvidence": ["implementation_artifacts", "test_evidence", "review_evidence", "commit_sha"],
+      "allowedTaskStatus": ["DONE", "DONE_WITH_CONCERNS", "success"],
+      "consumer": "stage-4",
+      "severity": "blocker",
+      "fix": "补齐缺失 task_id 的 task-N-result.json；每个任务必须有实现、测试、审查和提交 SHA 证据"
+    },
+    {
+      "id": "S3-STAGE_RESULT_CURRENT",
+      "description": "当前 run 的 stage-3-result.json 存在且属于本次运行",
+      "type": "artifact_current",
+      "artifactRole": "current_stage_3_result",
+      "fallbackGlob": "docs/.lifecycle/runs/*/skill-results/stage-3-result.json",
+      "consumer": "stage-4",
+      "severity": "blocker",
+      "fix": "运行 iterative-development 汇总当前 run 的 stage-3-result.json，并标记 current=true、run_id 匹配"
+    },
+    {
+      "id": "S3-STAGE_RESULT_READY",
+      "description": "阶段 3 汇总结论允许进入阶段 4",
+      "type": "json_field_equals",
+      "file": "docs/.lifecycle/runs/<run_id>/skill-results/stage-3-result.json",
+      "artifactRole": "current_stage_3_result",
+      "fields": {
+        "$.status": "success",
+        "$.next_action": "ready_for_stage_4",
+        "$.tasks_complete": true,
+        "$.tests_passed": true
+      },
+      "consumer": "stage-4",
+      "severity": "blocker",
+      "fix": "确保 stage-3-result.json 汇总所有任务完成、测试通过，并设置 next_action=ready_for_stage_4"
+    },
+    {
+      "id": "S3-FULL_REVIEW_CURRENT",
+      "description": "全分支审查结果是当前 run artifact，不能使用历史 final-review.json",
+      "type": "artifact_current",
+      "artifactRole": "current_review_result",
+      "fallbackGlob": "docs/reports/review/final-review.json",
+      "consumer": "stage-4",
+      "severity": "blocker",
+      "fix": "运行 comprehensive-review 并把当前 final-review.json 作为 target_artifacts.current_review_result 传入 stage-validator"
+    },
+    {
+      "id": "S3-FULL_REVIEW_PASSED",
+      "description": "全分支审查通过 — 阶段 4 只消费结构化审查结论，不从 commit message 或 Markdown 推断",
+      "type": "review_passed",
+      "file": "docs/reports/review/final-review.json",
+      "artifactRole": "current_review_result",
+      "statusPath": "$.status",
+      "requiredValue": "passed",
+      "maxCritical": 0,
+      "maxHigh": 0,
+      "consumer": "stage-4",
+      "severity": "blocker",
+      "fix": "修复 comprehensive-review 的 Critical/High findings，重新生成当前 run 的 final-review.json"
+    },
+    {
+      "id": "S3-TESTS_PASS",
+      "description": "所有测试当前通过 — 先按项目文件识别技术栈，再运行对应测试命令；多技术栈项目必须逐项通过",
+      "type": "command_succeeds",
+      "commandMatrix": {
+        "node": { "detect": "package.json", "command": "npm test", "timeoutSeconds": 180 },
+        "python": { "detect": ["pyproject.toml", "pytest.ini", "requirements.txt"], "command": "pytest", "timeoutSeconds": 180 },
+        "rust": { "detect": "Cargo.toml", "command": "cargo test", "timeoutSeconds": 180 },
+        "go": { "detect": "go.mod", "command": "go test ./...", "timeoutSeconds": 180 }
+      },
+      "matchMode": "detected_stack_all",
+      "consumer": "stage-4",
+      "severity": "blocker",
+      "fix": "修复当前技术栈对应测试命令的失败项；不得用其他生态命令成功结果掩盖失败"
+    },
+    {
+      "id": "S3-TASK_REPORTS_DIAGNOSTIC",
+      "description": "任务 Markdown 报告仅作为人工诊断材料，不参与 strict gate 放行",
+      "type": "pattern_grep_in_dir",
+      "pattern": "^状态:",
+      "directory": "docs/plans/task-briefs/",
+      "filePattern": "*-report.md",
+      "matchMode": "any_file",
+      "consumer": "human-diagnostics",
+      "severity": "warning",
+      "fix": "如需人工审计，保留 task report；机器放行以 task_matrix_complete 和 stage-3-result.json 为准"
+    }
+  ]
+}

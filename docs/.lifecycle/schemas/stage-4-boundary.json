@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage-4-boundary",
+  "title": "阶段 4 → 交付 接口校验规范",
+  "description": "验证 quality-assurance 产出的结构化质量结果、当前质量报告、安全发现和 waiver 满足交付条件。在阶段 4 最终交付判断前执行。",
+  "source": {
+    "type": "runtime_state",
+    "description": "阶段 4 放行以当前 run 的 stage-4-result.json、quality_report、security-findings.json 和 waiver 为准；Markdown 正则只作为人工诊断补充。"
+  },
+  "checks": [
+    {
+      "id": "S4-STAGE_RESULT_CURRENT",
+      "description": "当前 run 的 stage-4-result.json 存在且 current/run_id 绑定正确",
+      "type": "artifact_current",
+      "artifactRole": "current_stage_4_result",
+      "fallbackGlob": "docs/.lifecycle/runs/*/skill-results/stage-4-result.json",
+      "consumer": "delivery",
+      "severity": "blocker",
+      "fix": "运行 quality-assurance 生成当前 run 的 stage-4-result.json，并在 target_artifacts 中传入 current_stage_4_result"
+    },
+    {
+      "id": "S4-STAGE_RESULT_DELIVERABLE",
+      "description": "质量保障结构化结论允许交付",
+      "type": "json_field_equals",
+      "file": "docs/.lifecycle/runs/<run_id>/skill-results/stage-4-result.json",
+      "artifactRole": "current_stage_4_result",
+      "fields": {
+        "$.status": "success",
+        "$.next_action": "ready_for_delivery",
+        "$.gates.tests_passed": true,
+        "$.gates.critical_open": 0,
+        "$.gates.high_open": 0,
+        "$.gates.deliverable": true
+      },
+      "consumer": "delivery",
+      "severity": "blocker",
+      "fix": "修复测试、安全或交付门禁失败项；无有效 waiver 时 Critical/High 必须为 0"
+    },
+    {
+      "id": "S4-QUALITY_REPORT_CURRENT",
+      "description": "当前 run 的质量报告文件存在 — 交付决策只能基于 quality-assurance 本次返回的 artifact",
+      "type": "artifact_current",
+      "artifactRole": "current_quality_report",
+      "fallbackGlob": "docs/reports/quality/*-quality-report.md",
+      "consumer": "delivery",
+      "severity": "blocker",
+      "fix": "运行 quality-assurance 第六层生成当前质量报告，并在 stage-4-result.json 中标记 current=true、run_id 匹配"
+    },
+    {
+      "id": "S4-SECURITY_FINDINGS_CURRENT",
+      "description": "当前 run 的安全发现文件存在且绑定当前 run",
+      "type": "artifact_current",
+      "artifactRole": "current_security_findings",
+      "fallbackGlob": "docs/reports/security/security-findings.json",
+      "consumer": "delivery",
+      "severity": "blocker",
+      "fix": "运行依赖审计/安全检查并生成当前 run 的 security-findings.json；安全层跳过时也必须生成 findings=[]、critical_open=0、high_open=0 和 skip_reason"
+    },
+    {
+      "id": "S4-SECURITY_THRESHOLD",
+      "description": "无 open Critical/High；如存在例外，必须有结构化、未过期、scope/finding/approver/run_id 匹配的 waiver",
+      "type": "security_threshold",
+      "file": "docs/reports/security/security-findings.json",
+      "artifactRole": "current_security_findings",
+      "maxCritical": 0,
+      "maxHigh": 0,
+      "waiverArtifactRole": "current_security_waivers",
+      "requiredWaiverFields": ["waiver_id", "finding_id", "scope", "severity", "reason", "approver", "expires_at", "run_id"],
+      "consumer": "delivery",
+      "severity": "blocker",
+      "fix": "修复所有 Critical/High 安全发现，或提供结构化有效 waiver 并由用户确认"
+    },
+    {
+      "id": "S4-TEST_SUMMARY",
+      "description": "质量报告包含测试总览章节，供人工复核",
+      "type": "section_exists",
+      "pattern": "^## 测试总览",
+      "artifactRole": "current_quality_report",
+      "consumer": "human-diagnostics",
+      "severity": "blocker",
+      "fix": "在当前质量报告中补充 '## 测试总览' 章节"
+    },
+    {
+      "id": "S4-SECURITY_SECTION",
+      "description": "质量报告包含安全检查章节，供人工复核；机器门禁以 security_threshold 为准",
+      "type": "section_exists",
+      "pattern": "^## 安全检查",
+      "artifactRole": "current_quality_report",
+      "consumer": "human-diagnostics",
+      "severity": "blocker",
+      "fix": "在当前质量报告中补充 '## 安全检查' 章节"
+    },
+    {
+      "id": "S4-QUALITY_JUDGMENT",
+      "description": "质量报告包含明确质量判断章节，供人工复核；机器门禁以 stage-4-result.json 为准",
+      "type": "section_exists",
+      "pattern": "^## 质量判断",
+      "artifactRole": "current_quality_report",
+      "consumer": "human-diagnostics",
+      "severity": "blocker",
+      "fix": "在当前质量报告中补充 '## 质量判断' 章节"
+    },
+    {
+      "id": "S4-PERFORMANCE_EVIDENCE",
+      "description": "如阶段 1 定义硬性能目标，stage-4-result.json 必须包含性能通过证据；无硬目标时可跳过并记录原因",
+      "type": "json_field_equals",
+      "file": "docs/.lifecycle/runs/<run_id>/skill-results/stage-4-result.json",
+      "artifactRole": "current_stage_4_result",
+      "fields": {
+        "$.layers.performance": "passed"
+      },
+      "allowSkipWhen": "no_hard_performance_requirement",
+      "consumer": "delivery",
+      "severity": "warning",
+      "fix": "有硬性能目标时补充性能测试并写入结构化证据；无硬目标时在 stage-4-result.json 记录 skipped 原因"
+    }
+  ]
+}

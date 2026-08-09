@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stage-2-boundary",
+  "title": "阶段 2 → 阶段 3/4 接口校验规范",
+  "description": "验证 project-scaffolding 产出的项目骨架满足下游阶段的基本运行条件。在阶段 2 闸门通过前执行。",
+  "source": {
+    "type": "runtime_state",
+    "description": "阶段 2 的产出是可运行的项目骨架而非单一文件，通过命令执行、结构化 stage-2-result 和文件存在性来验证"
+  },
+  "checks": [
+    {
+      "id": "S2-STAGE_RESULT_CURRENT",
+      "description": "当前 run 的 stage-2-result.json 存在且标记为当前骨架结果",
+      "type": "artifact_current",
+      "artifactRole": "current_stage_2_result",
+      "fallbackGlob": "docs/.lifecycle/runs/*/skill-results/stage-2-result.json",
+      "consumer": "stage-3",
+      "severity": "blocker",
+      "fix": "运行 project-scaffolding 生成当前 run 的 stage-2-result.json，并在 target_artifacts 中传入 current_stage_2_result"
+    },
+    {
+      "id": "S2-STAGE_RESULT_READY",
+      "description": "阶段 2 汇总结论允许进入阶段 3",
+      "type": "json_field_equals",
+      "file": "docs/.lifecycle/runs/<run_id>/skill-results/stage-2-result.json",
+      "artifactRole": "current_stage_2_result",
+      "fields": {
+        "$.status": "success",
+        "$.next_action": "ready_for_stage_3",
+        "$.artifacts.git_initialized": true,
+        "$.artifacts.dependencies_installed": true,
+        "$.artifacts.schemas_copied": true,
+        "$.artifacts.skeleton_runnable": true,
+        "$.artifacts.git_clean": true
+      },
+      "consumer": "stage-3",
+      "severity": "blocker",
+      "fix": "补齐 stage-2-result.json 的当前 run 字段，并确保 Git、依赖、schema 复制、骨架运行、干净工作区全部为 true；标准模式另由 S2-TEST_FRAMEWORK_CONFIGURED 要求测试框架，simple_project 可用 smoke 命令证据和 skip_reason 替代"
+    },
+    {
+      "id": "S2-GIT_INITIALIZED",
+      "description": "Git 仓库已初始化 — 阶段 3 依赖 Git 进行隔离工作区和版本控制",
+      "type": "command_succeeds",
+      "command": "git status",
+      "consumer": "stage-3",
+      "severity": "blocker",
+      "fix": "在项目根目录执行 git init"
+    },
+    {
+      "id": "S2-GITIGNORE",
+      "description": ".gitignore 存在且包含关键排除项 — 防止依赖目录、缓存和敏感文件被追踪",
+      "type": "file_contains",
+      "file": ".gitignore",
+      "patterns": [".env", ".env.local"],
+      "matchMode": "all",
+      "consumer": "stage-3",
+      "severity": "blocker",
+      "fix": "创建 .gitignore 并添加依赖目录和敏感文件的排除规则"
+    },
+    {
+      "id": "S2-GITIGNORE_STACK_CACHE",
+      "description": ".gitignore 包含当前技术栈的依赖/缓存排除项；敏感文件检查由 S2-GITIGNORE 单独强制",
+      "type": "file_contains",
+      "file": ".gitignore",
+      "patternsByStack": {
+        "node": ["node_modules"],
+        "python": ["__pycache__", ".venv", "venv"],
+        "rust": ["target"],
+        "go": ["bin/", "*.test"]
+      },
+      "matchMode": "detected_stack_any_per_stack",
+      "consumer": "stage-3",
+      "severity": "warning",
+      "fix": "按检测到的技术栈补充依赖目录、缓存和构建输出排除项"
+    },
+    {
+      "id": "S2-DEPS_LOCKFILE_OR_DECLARED_NONE",
+      "description": "依赖锁定或显式声明无外部依赖 — 避免阶段 3 在未定义依赖状态下开发",
+      "type": "file_exists",
+      "file": ["package-lock.json", "Cargo.lock", "yarn.lock", "pnpm-lock.yaml", "requirements.txt", "go.mod", "docs/.lifecycle/no-external-deps.md"],
+      "matchMode": "any",
+      "consumer": "stage-3",
+      "severity": "blocker",
+      "fix": "运行包管理器安装/锁定依赖；Go 项目用 go.mod 作为依赖声明；无外部依赖时写入 docs/.lifecycle/no-external-deps.md 说明"
+    },
+    {
+      "id": "S2-DEPS_INSTALLED_BY_STACK",
+      "description": "依赖安装/下载状态按技术栈验证 — 优先使用 stage-2-result.json 中记录的包管理器命令证据，不用有限目录集合误判 Go、PnP、uv/poetry 或自定义 target-dir 项目",
+      "type": "command_succeeds",
+      "commandArtifactRole": "stage_2_dependency_commands",
+      "commandMatrix": {
+        "node": { "detect": "package.json", "command": "npm ls --depth=0", "timeoutSeconds": 60 },
+        "python": { "detect": ["pyproject.toml", "requirements.txt"], "command": "python -m pip check", "timeoutSeconds": 60 },
+        "rust": { "detect": "Cargo.toml", "command": "cargo metadata --no-deps", "timeoutSeconds": 60 },
+        "go": { "detect": "go.mod", "command": "go mod download", "timeoutSeconds": 120 },
+        "none": { "detect": "docs/.lifecycle/no-external-deps.md", "command": "test -f docs/.lifecycle/no-external-deps.md", "timeoutSeconds": 30 }
+      },
+      "matchMode": "detected_stack_all",
+      "consumer": "stage-3",
+      "severity": "blocker",
+      "fix": "按 stage-2-result.json 中记录的包管理器命令验证依赖；若项目确实无外部依赖，显式写入 no-external-deps 说明"
+    },
+    {
+      "id": "S2-TEST_FRAMEWORK_CONFIGURED",
+      "description": "测试框架或 simple_project smoke 已配置并可运行 — 多技术栈项目必须逐项验证",
+      "type": "command_succeeds",
+      "allowSkipWhen": "mode=simple_project && stage-2-result.artifacts.smoke_commands_present=true",
+      "commandMatrix": {
+        "node": { "detect": "package.json", "command": "npm test", "timeoutSeconds": 120 },
+        "python": { "detect": ["pyproject.toml", "pytest.ini", "requirements.txt"], "command": "pytest --collect-only", "timeoutSeconds": 120 },
+        "rust": { "detect": "Cargo.toml", "command": "cargo test --no-run", "timeoutSeconds": 120 },
+        "go": { "detect": "go.mod", "command": "go test ./...", "timeoutSeconds": 120 }
+      },
+      "matchMode": "detected_stack_all",
+      "consumer": ["stage-3", "stage-4"],
+      "severity": "blocker",
+      "fix": "安装并配置当前项目技术栈对应的测试框架；simple_project 模式可用结构化 smoke 命令证据替代，但必须记录跳过原因"
+    },
+    {
+      "id": "S2-SKELETON_RUNNABLE",
+      "description": "骨架可运行 — 优先使用 stage-2-result.json 记录的 smoke_commands；未记录时按技术栈默认 smoke/健康检查执行",
+      "type": "command_succeeds",
+      "commandArtifactRole": "stage_2_smoke_commands",
+      "commandMatrix": {
+        "node": { "detect": "package.json", "command": "npm run smoke", "timeoutSeconds": 60, "successEvidence": { "stdoutPattern": "(READY|OK|PASS|passed|HTTP 200)", "stderrMustNotMatch": "(Error|Exception|Traceback|failed|panic)" } },
+        "python": { "detect": ["pyproject.toml", "requirements.txt"], "command": "python -m src.main --smoke", "timeoutSeconds": 60, "successEvidence": { "stdoutPattern": "(READY|OK|PASS|passed|HTTP 200)", "stderrMustNotMatch": "(Error|Exception|Traceback|failed|panic)" } },
+        "rust": { "detect": "Cargo.toml", "command": "cargo run -- --smoke", "timeoutSeconds": 60, "successEvidence": { "stdoutPattern": "(READY|OK|PASS|passed|HTTP 200)", "stderrMustNotMatch": "(Error|Exception|Traceback|failed|panic)" } },
+        "go": { "detect": "go.mod", "command": "go test ./...", "timeoutSeconds": 120 }
+      },
+      "matchMode": "detected_stack_all",
+      "consumer": "stage-3",
+      "severity": "blocker",
+      "fix": "为每个当前技术栈提供 smoke/健康检查命令；Go 项目以 go test ./... 退出码为健康证据"
+    },
+    {
+      "id": "S2-GIT_CLEAN",
+      "description": "工作区干净 — 骨架搭建完成后的状态必须全提交，作为下游隔离开发基线",
+      "type": "command_output_is",
+      "command": "git status --porcelain",
+      "expectedOutput": "",
+      "consumer": "stage-3",
+      "severity": "blocker",
+      "fix": "将已确认骨架文件 git add + git commit；未确认改动不得进入阶段 3"
+    },
+    {
+      "id": "S2-LIFECYCLE_DIR",
+      "description": ".lifecycle 目录存在 — 编排器记录进度、schema、结果和决策的存储位置",
+      "type": "dir_exists",
+      "path": "docs/.lifecycle",
+      "consumer": "orchestrator",
+      "severity": "blocker",
+      "fix": "创建 docs/.lifecycle/ 目录、schemas/、runs/ 和 checkpoint/result 结构"
+    }
+  ]
+}

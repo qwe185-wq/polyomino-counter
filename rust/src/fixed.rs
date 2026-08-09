@@ -20,6 +20,7 @@ use crate::symmetric::{has_symmetry_180, has_symmetry_90, SymmetryStats};
 use crate::types::*;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
 
 // ================================================================
@@ -60,13 +61,13 @@ pub fn enumerate_fixed_with_symmetry(
 
     let mut cur_masks: Vec<Mask> = vec![1u64]; // single cell at (0,0)
 
-    // 导出种子形状 (size=1)
+    // 导出种子形状 (size=1, monomino = Fixed = One-sided)
     if let Some(ref exp) = export {
         let seed_data: Vec<(Mask, usize, bool)> = cur_masks
             .iter()
             .map(|&mask| {
                 let (w, h) = mask_extent(mask);
-                (mask, w.max(h), false) // monomino has no hole
+                (mask, w.max(h), false)
             })
             .collect();
         if let Err(e) = exp.write_batch(&seed_data) {
@@ -87,13 +88,42 @@ pub fn enumerate_fixed_with_symmetry(
         let dedup_cap = (n_shapes * 2).max(1024);
         let dedup = Arc::new(ShardedHashSet::new(dedup_cap));
 
+        let export_enabled = export.is_some();
+
+        // One-sided 去重: Fixed ≈ 4× One-sided，容量取 Fixed 的 1/3
+        let os_dedup = if export_enabled {
+            Some(Arc::new(ShardedHashSet::new((dedup_cap / 3).max(1024))))
+        } else {
+            None
+        };
+
         // 每线程 fold 缓冲初始容量: 本代平均产出 = n_shapes/size*3 / n_threads
         let n_threads = rayon::current_num_threads();
         let fold_cap = (n_shapes / n_threads / 4).max(1024);
 
-        let export_enabled = export.is_some();
+        // 流式导出通道：避免攒大量数据到内存
+        let (exp_tx, exp_rx) = if export_enabled {
+            let (tx, rx) = sync_channel::<Vec<(Mask, usize, bool)>>(64);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
 
-        let (next_masks, export_data): (Vec<Mask>, Vec<(Mask, usize, bool)>) = cur_masks
+        // 后台写线程
+        let writer_handle = if let (Some(ref exp), Some(rx)) = (&export, exp_rx) {
+            let exp = Arc::clone(exp);
+            Some(std::thread::spawn(move || {
+                for batch in rx {
+                    if let Err(e) = exp.write_batch(&batch) {
+                        eprintln!("  [导出] 写入错误: {}", e);
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        let (next_masks, mut export_remnants): (Vec<Mask>, Vec<(Mask, usize, bool)>) = cur_masks
             .par_iter()
             .with_min_len(if n_shapes < 500 { n_shapes } else { 16 })
             .fold(
@@ -101,7 +131,7 @@ pub fn enumerate_fixed_with_symmetry(
                     (
                         Vec::<Mask>::with_capacity(fold_cap),
                         if export_enabled {
-                            Vec::with_capacity(fold_cap)
+                            Vec::with_capacity(fold_cap.min(100_000))
                         } else {
                             Vec::new()
                         },
@@ -126,7 +156,6 @@ pub fn enumerate_fixed_with_symmetry(
                     let (pw, ph) = mask_extent(pmask);
                     let box_at_max = pw == max_n && ph == max_n;
 
-                    // 前沿计算
                     let frontier = compute_frontier_inline(
                         box_at_max, max_n, &cells_r, &cells_c, cc, pw, ph,
                     );
@@ -141,13 +170,28 @@ pub fn enumerate_fixed_with_symmetry(
                         }
                         local_new.push(canonical);
 
-                        // 洞检测
                         let has_hole = poly_has_hole(canonical, can_w, can_h);
                         let md = can_w.max(can_h);
 
-                        // 导出数据收集
-                        if export_enabled {
-                            local_exp.push((canonical, md, has_hole));
+                        // One-sided 去重 + 导出
+                        if let Some(ref os_hs) = os_dedup {
+                            let (os_canon, os_w, os_h) =
+                                compute_canonical(canonical, can_w, can_h);
+                            if os_hs.check_and_insert(os_canon) {
+                                // 新 One-sided: 用 One-sided canonical 的信息导出
+                                let os_has_hole = poly_has_hole(os_canon, os_w, os_h);
+                                let os_md = os_w.max(os_h);
+                                local_exp.push((os_canon, os_md, os_has_hole));
+                                if local_exp.len() >= 100_000 {
+                                    if let Some(ref tx) = exp_tx {
+                                        let batch = std::mem::replace(
+                                            &mut local_exp,
+                                            Vec::with_capacity(100_000),
+                                        );
+                                        let _ = tx.send(batch);
+                                    }
+                                }
+                            }
                         }
                         for n in md..=max_n {
                             let i = n - 1;
@@ -159,7 +203,6 @@ pub fn enumerate_fixed_with_symmetry(
                             }
                         }
 
-                        // 对称性检测
                         if has_symmetry_90(canonical, can_w, can_h) {
                             sym90_stats.record(can_w, can_h, has_hole, max_n);
                         }
@@ -183,20 +226,24 @@ pub fn enumerate_fixed_with_symmetry(
         let next_count = next_masks.len();
         let gen_elapsed = gen_start.elapsed();
 
-        // 写入导出数据（每代完成后串行写入，避免文件 I/O 竞争）
-        if let Some(ref exp) = export {
+        // 流式导出：发送剩余批次 + 等待写线程
+        if let (Some(tx), Some(handle)) = (exp_tx, writer_handle) {
             let write_start = std::time::Instant::now();
-            let total_export = export_data.len();
-            if !export_data.is_empty() {
-                if let Err(e) = exp.write_batch(&export_data) {
-                    eprintln!("  [导出] 写入错误: {}", e);
-                }
+            // 发送各线程残余的 export 数据
+            if !export_remnants.is_empty() {
+                let batch = std::mem::replace(
+                    &mut export_remnants,
+                    Vec::new(),
+                );
+                let _ = tx.send(batch);
             }
+            drop(tx); // 关闭通道
+            let _ = handle.join(); // 等待写线程完成
             if verbose {
                 eprintln!(
                     "  [导出] 格={:2} 写出={} 耗时={:.3}s",
                     size,
-                    total_export,
+                    next_count,
                     write_start.elapsed().as_secs_f64(),
                 );
             }

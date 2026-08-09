@@ -37,8 +37,10 @@ temp/
 
 # 导出输出
 output/
+output_*/
 output_test/
 test_extract*/
+rust/output_*/
 
 # Rust 构建产物
 rust/target/

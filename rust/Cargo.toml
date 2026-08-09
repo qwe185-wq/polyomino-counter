@@ -1,0 +1,32 @@
+[package]
+name = "room-count"
+version = "0.1.0"
+edition = "2021"
+description = "多联骨牌房间计数 — Burnside 引理 + Fixed Polyomino + Jensen 转移矩阵"
+authors = ["room-count team"]
+
+[dependencies]
+# 并行迭代器 — 替代 OpenMP parallel for
+rayon = "1.10"
+
+# 快速同步原语 — parking_lot RwLock 比 std 快 3-5x
+parking_lot = "0.12"
+
+# 快速整数哈希 — FxHash 比 SipHash 快 5-10x（整数 key）
+rustc-hash = "2.1"
+
+# CLI 参数解析
+clap = { version = "4.5", features = ["derive"] }
+
+# 小数组优化 — 栈上分配 ≤256 元素
+smallvec = "1.14"
+
+# 高性能内存分配器 — 减少碎片，优化并发
+mimalloc = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

@@ -35,6 +35,9 @@ tmp/
 temp/
 *.tmp
 
+# Rust 构建产物
+rust/target/
+
 # Worktree 隔离
 .worktrees/
 .claude/worktrees/*

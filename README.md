@@ -13,40 +13,69 @@
 
 问题等价于：统计所有能嵌入 n×n 网格的 **one-sided polyomino**，并分类为有洞/无洞。
 
-## 算法
+## 实现
 
-基于 **Redelmeier 算法**（1981）的 polyomino 生长枚举：
-1. 从单格开始，逐格添加邻居（生长法）
-2. 每次扩展后计算 **one-sided canonical form**（4 旋转取最小位图）
-3. 开放寻址哈希集合去重（splitmix64 哈希）
-4. Flood fill 检测亏格（有洞/无洞）
+| 语言 | 算法 | n=5 | n=6 | 内存 |
+|------|------|-----|-----|------|
+| **C** | BFS + Burnside | 0.59s | 6min (未完成) | ~8GB |
+| **Rust** | BFS + Burnside + Rayon | 0.21s | 328s | ~8GB |
+| Rust (实验) | Redelmeier DFS | ~37s | — | O(n) 栈 |
+| Rust (实验) | Jensen 转移矩阵 | <1ms | — | 极小 |
 
 ## 构建
 
+### C 版本
+
 ```bash
+cd C
 make          # 编译（-O3 优化）
 make run      # 编译并运行
-make dev      # 调试版本
 make clean    # 清理
 ```
 
 **依赖**：GCC（MinGW-w64 或 Linux GCC），仅标准库。
 
+### Rust 版本
+
+```bash
+cd rust
+cargo build --release    # 编译
+cargo run --release -- 5  # 运行 n=5
+cargo test --release     # 测试
+```
+
+**依赖**：Rust 工具链（cargo），依赖库见 `rust/Cargo.toml`。
+
 ## 项目结构
 
 ```
 room-count/
-├── src/
-│   ├── common.h        # 通用类型与宏
-│   ├── hashset.h/c     # 哈希集合（去重）
-│   ├── enumerate.h/c   # 枚举引擎（生长+规范化+分类）
-│   └── main.c          # 入口 + 输出
-├── tests/              # 测试（待添加）
+├── C/                    # C 实现
+│   ├── Makefile
+│   ├── docs/HANDOFF.md
+│   └── src/
+│       ├── common.h      # 通用类型与宏
+│       ├── hashset.h/c   # 哈希集合（去重）
+│       ├── enumerate.h/c # 枚举引擎
+│       ├── timer.h       # 计时模块
+│       └── main.c        # 入口 + 输出
+├── rust/                 # Rust 实现
+│   ├── Cargo.toml
+│   ├── docs/HANDOFF-RUST.md
+│   └── src/
+│       ├── main.rs       # 入口 + CLI
+│       ├── types.rs      # 核心类型
+│       ├── bit_utils.rs  # 位运算 + 洞检测
+│       ├── hashset.rs    # 分片并发哈希集
+│       ├── fixed.rs      # BFS 枚举 + 对称检测
+│       ├── symmetric.rs  # 90°/180° 旋转对称
+│       ├── burnside.rs   # Burnside 引理
+│       ├── redelmeier.rs # Redelmeier DFS (实验)
+│       └── jensen.rs     # Jensen 转移矩阵 (实验)
 ├── docs/
-│   ├── plans/          # 实施计划
-│   ├── reports/        # 质量报告
-│   └── .lifecycle/     # 编排器状态
-├── Makefile
+│   ├── plans/            # 实施计划
+│   └── .lifecycle/       # 编排器状态
+├── README.md
 └── CHANGELOG.md
 ```
 
@@ -59,9 +88,9 @@ room-count/
 | 3 | 46 | 44 | 2 |
 | 4 | 2,404 | 1,899 | 505 |
 | 5 | 520,818 | 267,976 | 252,842 |
-| 6 | ? | ? | ? |
+| **6** | **410,964,612** | **112,877,832** | **298,086,780** |
 
-运行 `gcc -std=c99 -O3 -o room-count.exe src/*.c && ./room-count.exe 6` 获取 n=6 结果。
+n=6 由 Rust BFS 计算（328s，~8GB RAM）。
 
 ## 许可
 

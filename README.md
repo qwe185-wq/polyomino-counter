@@ -21,6 +21,7 @@
 | **Rust** | BFS + Burnside + Rayon | 0.21s | 328s | ~8GB |
 | Rust (实验) | Redelmeier DFS | ~37s | — | O(n) 栈 |
 | Rust (实验) | Jensen 转移矩阵 | <1ms | — | 极小 |
+| **Rust + export** | BFS + One-sided 导出 + 7z | <1s | ~655s | ~9GB |
 
 ## 构建
 
@@ -39,12 +40,25 @@ make clean    # 清理
 
 ```bash
 cd rust
-cargo build --release    # 编译
-cargo run --release -- 5  # 运行 n=5
-cargo test --release     # 测试
+cargo build --release             # 编译
+cargo run --release -- 5          # 枚举 n=5
+cargo run --release -- 6 --export # 枚举 + 导出 One-sided 二进制数据
+cargo test --release              # 测试
 ```
 
 **依赖**：Rust 工具链（cargo），依赖库见 `rust/Cargo.toml`。
+
+### 导出工具
+
+```bash
+# 去重验证（两阶段：hash 分片 + rayon 并行排序）
+cargo run --release --bin dedup_check -- output/all_fixed.zip
+
+# 形状提取与可视化
+python read_shapes.py output/all_fixed.zip --info              # 文件摘要（零解压）
+python read_shapes.py output/all_fixed.zip --txt --limit 10    # 前 10 个形状
+python read_shapes.py output/all_fixed.zip --ascii --from 1000 --to 1005  # 指定范围
+```
 
 ## 项目结构
 
@@ -62,16 +76,21 @@ room-count/
 ├── rust/                 # Rust 实现
 │   ├── Cargo.toml
 │   ├── docs/HANDOFF-RUST.md
-│   └── src/
-│       ├── main.rs       # 入口 + CLI
-│       ├── types.rs      # 核心类型
-│       ├── bit_utils.rs  # 位运算 + 洞检测
-│       ├── hashset.rs    # 分片并发哈希集
-│       ├── fixed.rs      # BFS 枚举 + 对称检测
-│       ├── symmetric.rs  # 90°/180° 旋转对称
-│       ├── burnside.rs   # Burnside 引理
-│       ├── redelmeier.rs # Redelmeier DFS (实验)
-│       └── jensen.rs     # Jensen 转移矩阵 (实验)
+│   ├── src/
+│   │   ├── main.rs       # 入口 + CLI（--export --jensen --dfs）
+│   │   ├── types.rs      # 核心类型
+│   │   ├── bit_utils.rs  # 位运算 + 洞检测 + 旋转 + 归一化
+│   │   ├── hashset.rs    # 分片并发哈希集
+│   │   ├── fixed.rs      # BFS 枚举 + 对称检测 + One-sided 去重
+│   │   ├── export.rs     # 分块二进制导出 + 7z 压缩
+│   │   ├── symmetric.rs  # 90°/180° 旋转对称
+│   │   ├── burnside.rs   # Burnside 引理
+│   │   ├── redelmeier.rs # Redelmeier DFS (实验)
+│   │   ├── jensen.rs     # Jensen 转移矩阵 (实验)
+│   │   └── bin/
+│   │       └── dedup_check.rs  # 并行去重验证工具
+│   └── output_n6/        # n=6 导出结果（.gitignore 排除）
+├── read_shapes.py        # 形状提取脚本（支持 .zip 流式读取）
 ├── docs/
 │   ├── plans/            # 实施计划
 │   └── .lifecycle/       # 编排器状态
@@ -90,7 +109,19 @@ room-count/
 | 5 | 520,818 | 267,976 | 252,842 |
 | **6** | **410,964,612** | **112,877,832** | **298,086,780** |
 
-n=6 由 Rust BFS 计算（328s，~8GB RAM）。
+n=6 由 Rust BFS 计算（328s 枚举，~655s 含导出+压缩，~9GB RAM）。
+
+### 导出数据集
+
+`rust/output_n6/` 包含 n=6 全部 410,964,612 个 One-sided polyomino：
+
+| 文件 | 大小 | 内容 |
+|------|------|------|
+| `all_fixed.zip` | 1.0 GB | 全部（42 个 chunk，每块 10M masks） |
+| `no_holes/n06_fixed.zip` | 288 MB | 无洞（112,877,832） |
+| `with_holes/n06_fixed.zip` | 742 MB | 有洞（298,086,780） |
+
+二进制格式：每个形状 8 字节 u64 LE（规范化位图，stride=8，左上角对齐）。
 
 ## 许可
 

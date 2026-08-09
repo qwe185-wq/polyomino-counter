@@ -60,7 +60,7 @@ fn main() {
     println!("  Burnside 引理 + Fixed Polyomino (Redelmeier 1981)");
     println!("  n×n 正方形网格 (n={})", max_n);
     println!("  并行: rayon (work-stealing)");
-    println!("  去重: 分片并发哈希集 (32 shards + mimalloc)");
+    println!("  去重: 分片并发哈希集 (1024 shards + mimalloc)");
     println!("  对称: 内联 90°/180° 旋转检测");
     println!("═══════════════════════════════════════════════════════════");
     println!();

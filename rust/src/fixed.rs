@@ -65,13 +65,20 @@ pub fn enumerate_fixed_with_symmetry(
             break;
         }
 
-        let dedup = Arc::new(ShardedHashSet::new(n_shapes * 4));
+        // 预分配哈希集: 每形状约生成 2-3 个候选，唯一率 ~80-90%
+        // 用 n_shapes * 2 作为容量估算（实测≈1.19×，留余量）
+        let dedup_cap = (n_shapes * 2).max(1024);
+        let dedup = Arc::new(ShardedHashSet::new(dedup_cap));
+
+        // 每线程 fold 缓冲初始容量: 本代平均产出 = n_shapes/size*3 / n_threads
+        let n_threads = rayon::current_num_threads();
+        let fold_cap = (n_shapes / n_threads / 4).max(1024);
 
         let next_masks: Vec<Mask> = cur_masks
             .par_iter()
             .with_min_len(if n_shapes < 500 { n_shapes } else { 16 })
             .fold(
-                || Vec::<Mask>::with_capacity(256),
+                || Vec::<Mask>::with_capacity(fold_cap),
                 |mut local_new, &pmask| {
                     // 提取坐标
                     let mut cells_r = [0usize; MAX_CELLS];

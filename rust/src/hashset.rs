@@ -21,8 +21,8 @@ use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
 /// 分片数量（2 的幂）
-/// 32 分片匹配典型线程数，每分片独立 RwLock
-const SHARD_BITS: usize = 5;
+/// 1024 分片 → 32 线程竞争同一分片概率 ~3%（远低于 C 版的 100%）
+const SHARD_BITS: usize = 10;
 const SHARD_COUNT: usize = 1 << SHARD_BITS;
 const SHARD_MASK: usize = SHARD_COUNT - 1;
 
@@ -32,12 +32,13 @@ struct Shard {
 }
 
 impl Shard {
-    fn new(_capacity: usize) -> Self {
-        // 延迟分配 — 不预分配容量，交由 mimalloc 按需扩展
-        // 对大容量场景 (>1M/shard)，预分配会导致 OOM
+    fn new(capacity: usize) -> Self {
+        // 预分配但限制上限: 每分片最多 128K 条目 (~1MB)，超大代让哈希集自行扩展
+        // 平衡预分配收益 (减少 rehash) 与峰值内存
+        let cap = capacity.min(131_072).max(1024);
         Self {
             set: RwLock::new(FxHashSet::with_capacity_and_hasher(
-                16, // 最小初始容量
+                cap,
                 rustc_hash::FxBuildHasher,
             )),
         }

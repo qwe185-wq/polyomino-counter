@@ -309,7 +309,6 @@ RoomCount *enumerate_all(int max_n, int *out_count) {
                 bool inserted;
 #pragma omp critical(orient_insert)
                 {
-                    /* 交叉检查: 别的线程可能已插入 */
                     if (hs_contains(orient_hs, canonical)) {
                         inserted = false;
                     } else {

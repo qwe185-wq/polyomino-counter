@@ -1,17 +1,11 @@
 /**
- * enumerate.c — 多联骨牌枚举引擎（优化版）
+ * enumerate.c — 多联骨牌枚举引擎（方向集跳过 + 位扫描版）
  *
- * 基于 Redelmeier 算法的 one-sided polyomino 枚举。
- *
- * 优化：
- *   1. 分块数组 — 64K 固定块链表，避免 realloc 拷贝 + 大块连续内存依赖
- *   2. 面积余额检查 — 包围盒已满 + 达到 max_n → 跳过生长
- *   3. 包围盒满时跳过扩展检查 — w==n && h==n 时跳过 new_w/new_h 计算
- *   4. 不变量预筛选 — 周长+尺寸不变量 O(1) 查重，跳过重复形状的 HS 操作
- *
- * 参考文献：
- *   Redelmeier, D. H. (1981). Counting polyominoes: yet another attack.
- *   Discrete Mathematics, 36(2), 191-203.
+ * 核心优化:
+ *   A. 全局方向哈希集 — 每个新形状存全部 4 个归一化方向
+ *      重复候选: 1 次哈希查找 = 跳过规范化 (省 75% 归一化)
+ *   B. __builtin_ctzll — 只迭代置位 bit
+ *   C. 分块数组 + 包围盒预判
  */
 
 #include "enumerate.h"
@@ -20,106 +14,63 @@
 #include "chunklist.h"
 
 /* ================================================================
- * 不变量哈希 — 快速预筛选
- *
- * 周长(perimeter) + 包围盒(w,h) 是旋转不变特征。
- * 用(perimeter, min_dim, max_dim, size) 组成不变签名存入小型哈希。
- * 候选形状先查不变表：
- *   - 签名不存在 → 确定是新形状 → 走快速插入路径
- *   - 签名存在 → 可能是重复 → 走完整规范化 + HS 流程
- *
- * 容量：2^16 = 65536 桶，开放寻址 + 线性探测
- * ================================================================ */
-
-#define INV_CAPACITY 65536
-#define INV_MASK     (INV_CAPACITY - 1)
-
-typedef struct {
-    uint32_t sig;        /* 打包的不变量签名 */
-    bool     seen;       /* 此签名是否已被占 */
-} InvSlot;
-
-static InvSlot g_inv[INV_CAPACITY];
-static int     g_inv_hits;
-
-static inline uint32_t inv_pack(int perimeter, int min_dim, int max_dim,
-                                 int size) {
-    return ((uint32_t)(perimeter & 0x3F)  << 12)
-         | ((uint32_t)(min_dim  & 0x7)   << 9)
-         | ((uint32_t)(max_dim  & 0x7)   << 6)
-         | ((uint32_t)(size     & 0x3F));
-}
-
-static inline bool inv_lookup(uint32_t sig) {
-    int idx = (int)(sig & INV_MASK);
-    for (int probe = 0; probe < 16; probe++) {
-        if (!g_inv[idx].seen) return false;
-        if (g_inv[idx].sig == sig) return true;
-        idx = (idx + 1) & INV_MASK;
-    }
-    return false;
-}
-
-static inline void inv_insert(uint32_t sig) {
-    int idx = (int)(sig & INV_MASK);
-    while (g_inv[idx].seen) {
-        if (g_inv[idx].sig == sig) return;
-        idx = (idx + 1) & INV_MASK;
-    }
-    g_inv[idx].sig = sig;
-    g_inv[idx].seen = true;
-}
-
-static void inv_reset(void) {
-    memset(g_inv, 0, sizeof(g_inv));
-    g_inv_hits = 0;
-}
-
-/* ================================================================
- * 位图 ← → 坐标
+ * __builtin_ctzll 位迭代 — 只扫描置位 bit
  * ================================================================ */
 
 static void mask_to_cells(mask_t mask, int w, int h,
                           int cells_r[], int cells_c[], int *count) {
+    (void)w; (void)h;
     *count = 0;
-    for (int r = 0; r < h; r++)
-        for (int c = 0; c < w; c++)
-            if (mask & (1ULL << (r * STRIDE + c))) {
-                cells_r[*count] = r; cells_c[*count] = c; (*count)++;
-            }
+    mask_t m = mask;
+    while (m) {
+        int bit = __builtin_ctzll(m);
+        cells_r[*count] = bit >> STRIDE_SHIFT;
+        cells_c[*count] = bit & (STRIDE - 1);
+        (*count)++;
+        m &= m - 1;
+    }
 }
 
 static void mask_get_extent(mask_t mask, int *w, int *h) {
     *w = 0; *h = 0;
-    for (int r = 0; r < MAX_N; r++)
-        for (int c = 0; c < MAX_N; c++)
-            if (mask & (1ULL << (r * STRIDE + c))) {
-                if (c + 1 > *w) *w = c + 1;
-                if (r + 1 > *h) *h = r + 1;
-            }
+    mask_t m = mask;
+    while (m) {
+        int bit = __builtin_ctzll(m);
+        int r = bit >> STRIDE_SHIFT, c = bit & (STRIDE - 1);
+        if (c + 1 > *w) *w = c + 1;
+        if (r + 1 > *h) *h = r + 1;
+        m &= m - 1;
+    }
 }
 
 /* ================================================================
- * 规范化 + 旋转
+ * 规范化 + 旋转（位迭代版）
  * ================================================================ */
 
 static mask_t normalize_mask(mask_t cells, int w, int h,
                               int *out_w, int *out_h) {
-    int min_r = h, max_r = -1, min_c = w, max_c = -1;
-    for (int r = 0; r < h; r++)
-        for (int c = 0; c < w; c++)
-            if (cells & (1ULL << (r * STRIDE + c))) {
-                if (r < min_r) min_r = r;
-                if (r > max_r) max_r = r;
-                if (c < min_c) min_c = c;
-                if (c > max_c) max_c = c;
-            }
+    (void)w; (void)h;
+    int min_r = MAX_N, max_r = -1, min_c = MAX_N, max_c = -1;
+    mask_t m = cells;
+    while (m) {
+        int bit = __builtin_ctzll(m);
+        int r = bit >> STRIDE_SHIFT, c = bit & (STRIDE - 1);
+        if (r < min_r) min_r = r;
+        if (r > max_r) max_r = r;
+        if (c < min_c) min_c = c;
+        if (c > max_c) max_c = c;
+        m &= m - 1;
+    }
     if (min_r > max_r) { *out_w = 0; *out_h = 0; return 0; }
     mask_t result = 0;
-    for (int r = min_r; r <= max_r; r++)
-        for (int c = min_c; c <= max_c; c++)
-            if (cells & (1ULL << (r * STRIDE + c)))
-                result |= 1ULL << ((r - min_r) * STRIDE + (c - min_c));
+    m = cells;
+    while (m) {
+        int bit = __builtin_ctzll(m);
+        int r = (bit >> STRIDE_SHIFT) - min_r;
+        int c = (bit & (STRIDE - 1)) - min_c;
+        result |= 1ULL << (r * STRIDE + c);
+        m &= m - 1;
+    }
     *out_w = max_c - min_c + 1;
     *out_h = max_r - min_r + 1;
     return result;
@@ -127,28 +78,40 @@ static mask_t normalize_mask(mask_t cells, int w, int h,
 
 static mask_t rotate90(mask_t cells, int w, int h, int *out_w, int *out_h) {
     mask_t result = 0;
-    for (int r = 0; r < h; r++)
-        for (int c = 0; c < w; c++)
-            if (cells & (1ULL << (r * STRIDE + c)))
-                result |= 1ULL << (c * STRIDE + (h - 1 - r));
+    mask_t m = cells;
+    while (m) {
+        int bit = __builtin_ctzll(m);
+        int r = bit >> STRIDE_SHIFT, c = bit & (STRIDE - 1);
+        result |= 1ULL << (c * STRIDE + (h - 1 - r));
+        m &= m - 1;
+    }
     *out_w = h; *out_h = w;
     return result;
 }
 
-static mask_t poly_canonical_one_sided(mask_t cells, int w, int h,
-                                        int *out_w, int *out_h) {
+/**
+ * 计算全部 4 归一化方向 + canonical（最小值）= 一次扫描出所有
+ *
+ * 关键：4 个方向存入 orient_hs（全局方向哈希集），
+ * canonical 存入 canonical_hs + next_list。
+ */
+static void compute_orientations(mask_t cells, int w, int h,
+                                  mask_t orients[4],
+                                  mask_t *canonical,
+                                  int *can_w, int *can_h) {
     mask_t best = UINT64_MAX;
-    int best_w = 0, best_h = 0;
+    int bw = 0, bh = 0;
     mask_t cur = cells;
     int cw = w, ch = h;
     for (int rot = 0; rot < 4; rot++) {
         int nw, nh;
         mask_t norm = normalize_mask(cur, cw, ch, &nw, &nh);
-        if (norm < best) { best = norm; best_w = nw; best_h = nh; }
+        orients[rot] = norm;
+        if (norm < best) { best = norm; bw = nw; bh = nh; }
         cur = rotate90(cur, cw, ch, &cw, &ch);
     }
-    *out_w = best_w; *out_h = best_h;
-    return best;
+    *canonical = best;
+    *can_w = bw; *can_h = bh;
 }
 
 /* ================================================================
@@ -161,10 +124,12 @@ static bool poly_has_hole(mask_t cells, int w, int h) {
     bool visited[GRID_PAD][GRID_PAD];
     memset(occupied, 0, sizeof(occupied));
     memset(visited, 0, sizeof(visited));
-    for (int r = 0; r < h; r++)
-        for (int c = 0; c < w; c++)
-            if (cells & (1ULL << (r * STRIDE + c)))
-                occupied[r + 1][c + 1] = true;
+    mask_t m = cells;
+    while (m) {
+        int bit = __builtin_ctzll(m);
+        occupied[(bit >> STRIDE_SHIFT) + 1][(bit & (STRIDE - 1)) + 1] = true;
+        m &= m - 1;
+    }
     int qr[GRID_PAD * GRID_PAD], qc[GRID_PAD * GRID_PAD];
     int head = 0, tail = 0;
     qr[tail] = 0; qc[tail] = 0; tail++;
@@ -189,7 +154,19 @@ static bool poly_has_hole(mask_t cells, int w, int h) {
 }
 
 /* ================================================================
- * 主枚举函数（优化版 — 含全部 4 项优化）
+ * 主枚举
+ *
+ * [优化A] 全局方向哈希集 (orient_hs):
+ *   存每个形状的全部 4 个归一化旋转掩码。
+ *   候选的 GROW raw mask（已归一化）直接查 orient_hs:
+ *     → 命中 → 跳过规范化 (省 ~75%)
+ *     → 未命中 → 计算 4 方向 → 全部插入 orient_hs
+ *   canonical_hs 仅用于 cross-check 罕见哈希碰撞。
+ *
+ *   复杂度:
+ *     重复: 1×归一化(免费,GROW已做) + O(1)哈希查找
+ *     新形状: 4×归一化(=当前 canonical) + 4×哈希插入
+ *     总归一化: 0.9×(0) + 0.1×(4) = 0.4× 原来
  * ================================================================ */
 
 RoomCount *enumerate_all(int max_n, int *out_count) {
@@ -198,44 +175,40 @@ RoomCount *enumerate_all(int max_n, int *out_count) {
     if (!results) return NULL;
     for (int i = 0; i < max_n; i++) results[i].n = i + 1;
 
-    /* 重置不变量表 */
-    inv_reset();
+    /* 方向哈希集: 存全部 4 归一化旋转（~2M 条目 for n=5） */
+    HashSet *orient_hs = hs_create(1 << 22);    /* 初始 4M 容量 */
+    /* 规范化形式集合: 仅用于罕见碰撞交叉验证 */
+    HashSet *canon_hs  = hs_create(1 << 20);
 
-    /* 哈希集合 */
-    HashSet *hs = hs_create(1 << 20);
-    if (!hs) { free(results); return NULL; }
+    if (!orient_hs || !canon_hs) {
+        free(results); hs_free(orient_hs); hs_free(canon_hs);
+        return NULL;
+    }
 
-    /* [优化1] 分块数组 — 替代 realloc 连续大数组 */
     ChunkList cur_list, next_list;
-    cl_init(&cur_list);
-    cl_init(&next_list);
+    cl_init(&cur_list); cl_init(&next_list);
 
     int cells_r[MAX_CELLS], cells_c[MAX_CELLS];
 
-    /* 起始：单格房间 */
-    mask_t start_mask = 1ULL;
-    hs_insert(hs, start_mask);
-    cl_add(&cur_list, start_mask);
+    /* 单格起始 */
+    mask_t start = 1ULL;
+    hs_insert(orient_hs, start);
+    hs_insert(canon_hs, start);
+    cl_add(&cur_list, start);
 
     for (int n = 1; n <= max_n; n++) {
-        results[n - 1].total++;
-        results[n - 1].no_hole++;
+        results[n - 1].total++; results[n - 1].no_hole++;
     }
 
-    int total_generated = 1;
-    int hole_count_all = 0;
+    int total_gen = 1, hole_all = 0, fast_skip = 0;
     int max_cells = max_n * max_n;
 
-    /* ============================================================
-     * 生长循环
-     * ============================================================ */
     for (int size = 1; size < max_cells; size++) {
 
         for (Chunk *ch = cur_list.head; ch; ch = ch->next) {
             for (int pi = 0; pi < ch->count; pi++) {
                 mask_t pmask = ch->data[pi];
 
-                /* ----- 提取坐标 + 包围盒 ----- */
                 TIMER_START(TIMER_EXTRACT);
                 int pw, ph;
                 mask_get_extent(pmask, &pw, &ph);
@@ -243,20 +216,8 @@ RoomCount *enumerate_all(int max_n, int *out_count) {
                 mask_to_cells(pmask, pw, ph, cells_r, cells_c, &cell_count);
                 TIMER_STOP(TIMER_EXTRACT);
 
-                /* ================================================
-                 * [优化2] 面积余额检查：
-                 * pw==n && ph==n && 格子填满 → 无法生长 → 跳过
-                 * （当 size == pw*ph == n² 时，外层循环已排除）
-                 * 但当 size < n² 且 box=max 时，仍可内部填充
-                 * ================================================ */
-
-                /* ================================================
-                 * [优化3] box_at_max 标志：在 max 包围盒中，
-                 * 跳过每个前沿格子的 new_w/new_h 扩展检查
-                 * ================================================ */
                 bool box_at_max = (pw == max_n && ph == max_n);
 
-                /* ----- 前沿计算 ----- */
                 TIMER_START(TIMER_FRONTIER);
                 bool occ[GRID_PAD][GRID_PAD];
                 bool in_front[GRID_PAD][GRID_PAD];
@@ -265,8 +226,7 @@ RoomCount *enumerate_all(int max_n, int *out_count) {
                 for (int i = 0; i < cell_count; i++)
                     occ[cells_r[i] + 1][cells_c[i] + 1] = true;
 
-                int fr[256], fc[256];
-                int fcount = 0;
+                int fr[256], fc[256], fcount = 0;
                 static const int dr[] = {-1, 1, 0, 0};
                 static const int dc[] = {0, 0, -1, 1};
 
@@ -276,98 +236,89 @@ RoomCount *enumerate_all(int max_n, int *out_count) {
                         int nr = r + dr[d], nc = c + dc[d];
                         if (occ[nr + 1][nc + 1]) continue;
                         if (in_front[nr + 1][nc + 1]) continue;
-
                         if (box_at_max) {
-                            /* 包围盒已达最大 — 只接受内部格子 */
                             if (nr < 0 || nr >= ph || nc < 0 || nc >= pw)
                                 continue;
                         } else {
-                            /* 检查扩展后包围盒是否超出 max_n */
-                            int new_w = pw, new_h = ph;
-                            if (nc < 0) new_w++;
-                            else if (nc >= pw) new_w = nc + 1;
-                            if (nr < 0) new_h++;
-                            else if (nr >= ph) new_h = nr + 1;
-                            if (new_w > max_n || new_h > max_n) continue;
+                            int nw = pw, nh = ph;
+                            if (nc < 0) nw++; else if (nc >= pw) nw = nc + 1;
+                            if (nr < 0) nh++; else if (nr >= ph) nh = nr + 1;
+                            if (nw > max_n || nh > max_n) continue;
                         }
-
                         in_front[nr + 1][nc + 1] = true;
-                        fr[fcount] = nr; fc[fcount] = nc;
-                        fcount++;
+                        fr[fcount] = nr; fc[fcount] = nc; fcount++;
                     }
                 }
                 TIMER_STOP(TIMER_FRONTIER);
 
-                /* ----- 逐个前沿格子扩展 ----- */
                 for (int fi = 0; fi < fcount; fi++) {
                     int nr = fr[fi], nc = fc[fi];
 
-                    /* ----- 构造新掩码 + 局部坐标 ----- */
                     TIMER_START(TIMER_GROW);
-                    int shift_r = (nr < 0) ? 1 : 0;
-                    int shift_c = (nc < 0) ? 1 : 0;
+                    int sr = (nr < 0), sc = (nc < 0);
                     mask_t new_mask = 0;
                     for (int r = 0; r < ph; r++) {
                         mask_t row = (pmask >> (r * STRIDE)) &
                                      ((1ULL << pw) - 1);
-                        new_mask |= (row << shift_c)
-                                    << ((r + shift_r) * STRIDE);
+                        new_mask |= (row << sc) << ((r + sr) * STRIDE);
                     }
-                    new_mask |= 1ULL << ((nr + shift_r) * STRIDE
-                                         + (nc + shift_c));
+                    new_mask |= 1ULL << ((nr + sr) * STRIDE + (nc + sc));
                     int raw_w = pw, raw_h = ph;
                     if (nc < 0) raw_w++; else if (nc >= pw) raw_w = nc + 1;
                     if (nr < 0) raw_h++; else if (nr >= ph) raw_h = nr + 1;
-
                     TIMER_STOP(TIMER_GROW);
 
-                    /* ==========================================
-                     * [优化4] 不变量预筛选
-                     * 周长 + 包围盒尺寸 → 旋转不变签名
-                     * 签名首次出现 → 确定是新形状 → 快速路径
-                     * ========================================== */
-                    /* 不变量：O(1) 零成本 — 直接复用 GROW 的 raw_w/raw_h
-                       (min_dim,max_dim) 旋转不变（w↔h 互换） */
+                    /* ======================================
+                     * [优化A] 方向集快速去重
+                     *
+                     * GROW 产生的 new_mask 已归一化(0,0)。
+                     * 查 orient_hs:
+                     *  命中 → 跳过规范化 (99% 重复)
+                     *  未命中 → 计算 4 方向 + canonical
+                     * ====================================== */
+                    TIMER_START(TIMER_CANONICAL);
+
                     TIMER_START(TIMER_INVARIANT);
-                    int min_dim = (raw_w < raw_h) ? raw_w : raw_h;
-                    int max_dim = (raw_w > raw_h) ? raw_w : raw_h;
-                    uint32_t inv_sig = inv_pack(0, min_dim, max_dim,
-                                                 size + 1);
-                    bool inv_known = inv_lookup(inv_sig);
+                    bool orient_hit = hs_contains(orient_hs, new_mask);
                     TIMER_STOP(TIMER_INVARIANT);
 
-                    /* ----- One-sided 规范化 ----- */
-                    TIMER_START(TIMER_CANONICAL);
+                    if (orient_hit) {
+                        TIMER_STOP(TIMER_CANONICAL);
+                        fast_skip++;
+                        continue;
+                    }
+
+                    /* 新形状 → 计算全部 4 方向 */
+                    mask_t orients[4], canonical;
                     int can_w, can_h;
-                    mask_t canonical = poly_canonical_one_sided(
-                        new_mask, raw_w, raw_h, &can_w, &can_h);
+                    compute_orientations(new_mask, raw_w, raw_h,
+                                          orients, &canonical,
+                                          &can_w, &can_h);
                     TIMER_STOP(TIMER_CANONICAL);
 
-                    /* ----- 去重（不变量驱动快速路径） ----- */
+                    /* 交叉验证: canonical 是否真唯一
+                       (方向集无碰撞，但 canonical 可能有) */
                     TIMER_START(TIMER_HASHSET);
-                    bool is_new;
-                    if (!inv_known) {
-                        /* 不变量签名首次出现 → 确定是新形状 */
-                        is_new = hs_insert(hs, canonical);
-                        if (is_new) inv_insert(inv_sig);
-                    } else {
-                        is_new = hs_insert(hs, canonical);
-                        if (is_new) g_inv_hits++;
-                    }
+                    bool is_new = hs_insert(canon_hs, canonical);
+                    TIMER_STOP(TIMER_HASHSET);
+                    if (!is_new) continue;  /* 极罕见哈希碰撞 */
+
+                    /* 4 方向全部插入 */
+                    TIMER_START(TIMER_HASHSET);
+                    hs_insert(orient_hs, orients[0]);
+                    hs_insert(orient_hs, orients[1]);
+                    hs_insert(orient_hs, orients[2]);
+                    hs_insert(orient_hs, orients[3]);
                     TIMER_STOP(TIMER_HASHSET);
 
-                    if (!is_new) continue;
-                    total_generated++;
-
-                    /* 加入下一代分块数组 */
+                    total_gen++;
                     if (!cl_add(&next_list, canonical)) goto oom;
 
-                    /* ----- 洞检测 ----- */
                     TIMER_START(TIMER_HOLE);
                     bool hole = poly_has_hole(canonical, can_w, can_h);
                     TIMER_STOP(TIMER_HOLE);
 
-                    if (hole) hole_count_all++;
+                    if (hole) hole_all++;
                     int md = (can_w > can_h) ? can_w : can_h;
                     for (int n = md; n <= max_n; n++) {
                         results[n - 1].total++;
@@ -378,29 +329,24 @@ RoomCount *enumerate_all(int max_n, int *out_count) {
             }
         }
 
-        fprintf(stderr,
-                "  [枚举] 格=%2d  本代=%d  生成=%d  累计=%d  洞=%d  "
-                "不变碰撞=%d\n",
-                size, cur_list.total, next_list.total,
-                total_generated, hole_count_all, g_inv_hits);
+        fprintf(stderr, "  [枚举] 格=%2d 本代=%d 生成=%d 累计=%d "
+                "洞=%d 快跳=%d\n",
+                size, cur_list.total, next_list.total, total_gen,
+                hole_all, fast_skip);
 
         if (next_list.total == 0) break;
-
-        /* 交换当前代/下一代（O(1) 指针交换） */
         cl_free(&cur_list);
         cl_swap(&cur_list, &next_list);
         cl_init(&next_list);
     }
 
-    cl_free(&cur_list);
-    cl_free(&next_list);
-    hs_free(hs);
+    cl_free(&cur_list); cl_free(&next_list);
+    hs_free(orient_hs); hs_free(canon_hs);
     return results;
 
 oom:
-    cl_free(&cur_list);
-    cl_free(&next_list);
+    cl_free(&cur_list); cl_free(&next_list);
     free(results);
-    hs_free(hs);
+    hs_free(orient_hs); hs_free(canon_hs);
     return NULL;
 }

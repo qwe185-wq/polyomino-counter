@@ -2,30 +2,106 @@
  * main.c — 入口程序
  *
  * 运行多联骨牌房间枚举，输出 n=1..max_n 的结果表。
- * 用法: room-count.exe [n]
- *   不指定 n 时默认运行到 MAX_N=6
+ *
+ * 用法:
+ *   room-count.exe [n] [--time]
+ *     n      — 网格尺寸（1..6，默认 6）
+ *     --time — 开启函数级计时 profiler
  */
 
 #include "enumerate.h"
+#include "timer.h"
 #include <time.h>
+#include <string.h>
+
+/* ================================================================
+ * 全局计时器
+ * ================================================================ */
+
+TimerSlot g_timers[TIMER_COUNT];
+int g_timing_enabled = 0;
+
+void timer_init(void) {
+    g_timers[TIMER_TOTAL].name    = "总耗时";
+    g_timers[TIMER_EXTRACT].name  = "掩码→坐标提取";
+    g_timers[TIMER_FRONTIER].name = "前沿计算";
+    g_timers[TIMER_GROW].name     = "扩展+构造掩码";
+    g_timers[TIMER_CANONICAL].name = "One-sided 规范化";
+    g_timers[TIMER_HOLE].name     = "Flood fill 洞检测";
+    g_timers[TIMER_HASHSET].name  = "哈希集合插入";
+}
+
+void timer_report(void) {
+    double total = g_timers[TIMER_TOTAL].total_sec;
+    if (total <= 0.0) total = 0.001;  /* 防止除零 */
+
+    printf("\n");
+    printf("  ╔══════════════════════════════════════════════════════════════╗\n");
+    printf("  ║           ⏱  函数级计时 Profiler 报告                        ║\n");
+    printf("  ╠══════════════════════════╤══════════╤══════════╤════════════╣\n");
+    printf("  ║ 函数                     │   调用次数  │  耗时(秒) │  占比       ║\n");
+    printf("  ╟──────────────────────────┼──────────┼──────────┼────────────╢\n");
+
+    for (int i = 0; i < TIMER_COUNT; i++) {
+        double pct = (g_timers[i].total_sec / total) * 100.0;
+        printf("  ║ %-24s │ %8d │ %8.3f │ %6.1f%%    ║\n",
+               g_timers[i].name,
+               g_timers[i].call_count,
+               g_timers[i].total_sec,
+               pct);
+    }
+
+    printf("  ╚══════════════════════════╧══════════╧══════════╧════════════╝\n");
+
+    /* 简易柱状图 */
+    printf("\n  ── 耗时占比可视化 ──\n");
+    for (int i = 0; i < TIMER_COUNT; i++) {
+        double pct = (g_timers[i].total_sec / total) * 100.0;
+        int bar_len = (int)(pct / 2.0 + 0.5);  /* 每 2% 一个字符 */
+        if (bar_len > 60) bar_len = 60;
+        if (bar_len < 1 && pct > 0.0) bar_len = 1;
+
+        printf("  %-24s │", g_timers[i].name);
+        for (int j = 0; j < bar_len; j++) printf("█");
+        printf(" %.1f%%\n", pct);
+    }
+    printf("\n");
+}
+
+/* ================================================================
+ * 主函数
+ * ================================================================ */
 
 int main(int argc, char **argv) {
     int max_n = MAX_N;
-    if (argc >= 2) {
-        max_n = atoi(argv[1]);
-        if (max_n < 1 || max_n > MAX_N) {
-            fprintf(stderr, "错误：n 必须在 1..%d 之间\n", MAX_N);
-            return 1;
+
+    /* 解析命令行参数 */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--time") == 0) {
+            g_timing_enabled = 1;
+        } else {
+            int val = atoi(argv[i]);
+            if (val >= 1 && val <= MAX_N) {
+                max_n = val;
+            }
         }
     }
+
+    /* 初始化计时器 */
+    TIMER_INIT();
 
     printf("═══════════════════════════════════════════════════════════\n");
     printf("  多联骨牌房间计数 — One-sided Polyomino 枚举\n");
     printf("  n×n 正方形网格，每个格子是一个房间单元\n");
     printf("  房间 = 墙+门围成的连通区域（≤ n×n）\n");
     printf("  去重规则：允许旋转+平移，禁止翻转（One-sided）\n");
-    printf("  目标 n = %d\n", max_n);
+    printf("  目标 n = %d", max_n);
+    if (g_timing_enabled) printf("  [⏱ Profiler 已开启]");
+    printf("\n");
     printf("═══════════════════════════════════════════════════════════\n\n");
+
+    /* ---------- [计时] 总耗时 ---------- */
+    TIMER_START(TIMER_TOTAL);
 
     clock_t start = clock();
 
@@ -34,6 +110,8 @@ int main(int argc, char **argv) {
 
     clock_t elapsed = clock() - start;
     double seconds = (double)elapsed / CLOCKS_PER_SEC;
+
+    TIMER_STOP(TIMER_TOTAL);
 
     if (!results) {
         fprintf(stderr, "错误：枚举失败（内存不足？）\n");
@@ -55,7 +133,7 @@ int main(int argc, char **argv) {
 
     printf("  ╚═════╧══════════╧══════════╧══════════╧═══════════════╝\n");
 
-    printf("\n  ⏱ 运行耗时: %.2f 秒\n", seconds);
+    printf("\n  ⏱ 运行耗时: %.2f 秒 (wall clock)\n", seconds);
     printf("  📊 唯一形状总数: %d (≤ %d×%d 包围矩形)\n",
            results[count - 1].total, max_n, max_n);
 
@@ -68,5 +146,9 @@ int main(int argc, char **argv) {
     }
 
     free(results);
+
+    /* ---------- [计时] 输出报告 ---------- */
+    TIMER_REPORT();
+
     return 0;
 }

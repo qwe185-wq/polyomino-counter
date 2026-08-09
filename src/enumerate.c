@@ -15,6 +15,7 @@
 
 #include "enumerate.h"
 #include "hashset.h"
+#include "timer.h"
 
 /* ================================================================
  * 内部辅助：位图 ← → 坐标列表
@@ -279,16 +280,16 @@ RoomCount *enumerate_all(int max_n, int *out_count) {
         for (int pi = 0; pi < cur_count; pi++) {
             mask_t pmask = cur_masks[pi];
 
-            /* 提取包围矩形尺寸 */
+            /* ---------- [计时] 掩码 → 坐标提取 ---------- */
+            TIMER_START(TIMER_EXTRACT);
             int pw, ph;
             mask_get_extent(pmask, &pw, &ph);
-
-            /* 提取格子坐标 */
             int cell_count;
             mask_to_cells(pmask, pw, ph, cells_r, cells_c, &cell_count);
+            TIMER_STOP(TIMER_EXTRACT);
 
-            /* ---------- 计算前沿（可扩展的空邻居） ---------- */
-            /* 用小型 visited 网格标记前沿，去重 */
+            /* ---------- [计时] 前沿计算 ---------- */
+            TIMER_START(TIMER_FRONTIER);
             bool occ[GRID_PAD][GRID_PAD];
             bool in_front[GRID_PAD][GRID_PAD];
             memset(occ, 0, sizeof(occ));
@@ -328,39 +329,48 @@ RoomCount *enumerate_all(int max_n, int *out_count) {
                     fcount++;
                 }
             }
+            TIMER_STOP(TIMER_FRONTIER);
 
             /* ---------- 逐个前沿格子扩展 ---------- */
             for (int fi = 0; fi < fcount; fi++) {
                 int nr = fr[fi], nc = fc[fi];
 
-                /* 计算平移量 */
+                /* ---------- [计时] 构造新掩码 ---------- */
+                TIMER_START(TIMER_GROW);
                 int shift_r = (nr < 0) ? 1 : 0;
                 int shift_c = (nc < 0) ? 1 : 0;
 
-                /* 构造新掩码（逐行移位，避免跨行泄漏） */
                 mask_t new_mask = 0;
                 for (int r = 0; r < ph; r++) {
-                    mask_t row = (pmask >> (r * STRIDE)) & ((1ULL << pw) - 1);
-                    new_mask |= (row << shift_c) << ((r + shift_r) * STRIDE);
+                    mask_t row = (pmask >> (r * STRIDE)) &
+                                 ((1ULL << pw) - 1);
+                    new_mask |= (row << shift_c)
+                                << ((r + shift_r) * STRIDE);
                 }
-                /* 添加新格子 */
-                new_mask |= 1ULL << ((nr + shift_r) * STRIDE + (nc + shift_c));
+                new_mask |= 1ULL << ((nr + shift_r) * STRIDE
+                                     + (nc + shift_c));
 
-                /* 计算新包围矩形（规范化前） */
                 int raw_w = pw;
                 if (nc < 0) raw_w++;
                 else if (nc >= pw) raw_w = nc + 1;
                 int raw_h = ph;
                 if (nr < 0) raw_h++;
                 else if (nr >= ph) raw_h = nr + 1;
+                TIMER_STOP(TIMER_GROW);
 
-                /* 计算 one-sided 规范化形式 */
+                /* ---------- [计时] One-sided 规范化 ---------- */
+                TIMER_START(TIMER_CANONICAL);
                 int can_w, can_h;
                 mask_t canonical = poly_canonical_one_sided(
                     new_mask, raw_w, raw_h, &can_w, &can_h);
+                TIMER_STOP(TIMER_CANONICAL);
 
-                /* 去重检查 */
-                if (!hs_insert(hs, canonical)) continue;
+                /* ---------- [计时] 哈希集合去重 ---------- */
+                TIMER_START(TIMER_HASHSET);
+                bool is_new = hs_insert(hs, canonical);
+                TIMER_STOP(TIMER_HASHSET);
+
+                if (!is_new) continue;
 
                 total_generated++;
 
@@ -368,8 +378,11 @@ RoomCount *enumerate_all(int max_n, int *out_count) {
                 ENSURE_CAP(next_masks, next_cap, next_count + 1);
                 next_masks[next_count++] = canonical;
 
-                /* ---------- 分类统计 ---------- */
+                /* ---------- [计时] 洞检测 ---------- */
+                TIMER_START(TIMER_HOLE);
                 bool hole = poly_has_hole(canonical, can_w, can_h);
+                TIMER_STOP(TIMER_HOLE);
+
                 if (hole) hole_count_all++;
 
                 int max_dim = (can_w > can_h) ? can_w : can_h;

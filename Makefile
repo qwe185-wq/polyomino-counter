@@ -2,8 +2,8 @@
 # 多联骨牌房间计数项目
 
 CC       = gcc
-CFLAGS   = -std=c99 -O3 -march=native -Wall -Wextra
-LDFLAGS  =
+CFLAGS   = -std=c99 -O3 -march=native -Wall -Wextra -fopenmp
+LDFLAGS  = -fopenmp
 
 # 源文件
 SRCDIR   = src

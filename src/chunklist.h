@@ -72,4 +72,17 @@ static inline void cl_swap(ChunkList *a, ChunkList *b) {
     *b = tmp;
 }
 
+/* ---------- 合并 src 到 dest（O(1)，链接链表） ---------- */
+static inline void cl_merge(ChunkList *dest, ChunkList *src) {
+    if (!src->head) return;
+    if (!dest->head) {
+        dest->head = src->head;
+        dest->tail = src->tail;
+    } else {
+        dest->tail->next = src->head;
+        dest->tail = src->tail;
+    }
+    dest->total += src->total;
+}
+
 #endif /* CHUNKLIST_H */

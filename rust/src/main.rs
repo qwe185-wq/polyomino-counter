@@ -10,6 +10,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod bit_utils;
 mod burnside;
+mod export;
 mod fixed;
 mod hashset;
 mod jensen;
@@ -18,9 +19,12 @@ mod symmetric;
 mod types;
 
 use crate::burnside::apply_burnside;
+use crate::export::ExportManager;
 use crate::fixed::enumerate_fixed_with_symmetry;
 use crate::types::*;
 use clap::Parser;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Parser, Debug)]
@@ -36,6 +40,12 @@ struct Args {
     /// 使用 Jensen 转移矩阵法
     #[arg(long)]
     jensen: bool,
+    /// 导出 Fixed mask 二进制数据 + 7-zip 压缩
+    #[arg(long)]
+    export: bool,
+    /// 导出目录（默认: output）
+    #[arg(long, default_value = "output")]
+    export_dir: PathBuf,
 }
 
 fn main() {
@@ -53,16 +63,36 @@ fn main() {
 
     let total_start = Instant::now();
 
+    // 初始化导出
+    let export_mgr: Option<Arc<ExportManager>> = if args.export {
+        println!("── 导出模式: Fixed mask → {} ──", args.export_dir.display());
+        match ExportManager::new(&args.export_dir) {
+            Ok(mgr) => Some(Arc::new(mgr)),
+            Err(e) => {
+                eprintln!("  [导出] 初始化失败: {}", e);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     let results = if args.jensen {
         println!("── Jensen 转移矩阵法 ──");
+        if args.export {
+            eprintln!("  [导出] 警告: Jensen 模式不支持导出，忽略 --export");
+        }
         crate::jensen::enumerate_jensen(max_n, args.verbose)
     } else if args.dfs {
         println!("── Redelmeier DFS 枚举 ──");
+        if args.export {
+            eprintln!("  [导出] 警告: DFS 模式不支持导出，忽略 --export");
+        }
         crate::redelmeier::enumerate_redelmeier(max_n, args.verbose)
     } else {
         println!("── Fixed BFS 枚举 + 对称性检测 ──");
         let (fixed, sym90, sym180) =
-            enumerate_fixed_with_symmetry(max_n, args.verbose);
+            enumerate_fixed_with_symmetry(max_n, args.verbose, export_mgr.clone());
         let os = apply_burnside(&fixed, &sym90, &sym180);
 
         if args.verbose {
@@ -106,4 +136,14 @@ fn main() {
 
     println!("\n  ⏱ 总耗时: {:.3}s", total_elapsed.as_secs_f64());
     if all_ok && max_n <= 5 { println!("\n  ✓ 所有已知结果验证通过！"); }
+
+    // 7-zip 压缩
+    if let Some(ref mgr) = export_mgr {
+        println!();
+        println!("── 7-zip 压缩 ──");
+        if let Err(e) = mgr.compress_7z() {
+            eprintln!("  [压缩] 错误: {}", e);
+        }
+        println!("\n  导出目录: {}", args.export_dir.display());
+    }
 }

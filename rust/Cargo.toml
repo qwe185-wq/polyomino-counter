@@ -2,6 +2,7 @@
 name = "room-count"
 version = "0.1.0"
 edition = "2021"
+default-run = "room-count"
 description = "多联骨牌房间计数 — Burnside 引理 + Fixed Polyomino + Jensen 转移矩阵"
 authors = ["room-count team"]
 

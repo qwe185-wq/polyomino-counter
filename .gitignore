@@ -35,6 +35,11 @@ tmp/
 temp/
 *.tmp
 
+# 导出输出
+output/
+output_test/
+test_extract*/
+
 # Rust 构建产物
 rust/target/
 

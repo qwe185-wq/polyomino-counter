@@ -14,6 +14,7 @@
 //! Burnside: One-sided = (Fixed + 2·Sym90 + Sym180) / 4
 
 use crate::bit_utils::*;
+use crate::export::ExportManager;
 use crate::hashset::ShardedHashSet;
 use crate::symmetric::{has_symmetry_180, has_symmetry_90, SymmetryStats};
 use crate::types::*;
@@ -28,9 +29,11 @@ use std::sync::Arc;
 /// 运行 Fixed polyomino 枚举 + 对称性检测
 ///
 /// 返回 (fixed, sym90, sym180) 三组 RoomCount。
+/// 如果 `export` 为 Some，则在枚举过程中将 Fixed mask 写入磁盘。
 pub fn enumerate_fixed_with_symmetry(
     max_n: usize,
     verbose: bool,
+    export: Option<Arc<ExportManager>>,
 ) -> (Vec<RoomCount>, Vec<RoomCount>, Vec<RoomCount>) {
     assert!(max_n <= MAX_N, "max_n must be <= {}", MAX_N);
 
@@ -57,6 +60,20 @@ pub fn enumerate_fixed_with_symmetry(
 
     let mut cur_masks: Vec<Mask> = vec![1u64]; // single cell at (0,0)
 
+    // 导出种子形状 (size=1)
+    if let Some(ref exp) = export {
+        let seed_data: Vec<(Mask, usize, bool)> = cur_masks
+            .iter()
+            .map(|&mask| {
+                let (w, h) = mask_extent(mask);
+                (mask, w.max(h), false) // monomino has no hole
+            })
+            .collect();
+        if let Err(e) = exp.write_batch(&seed_data) {
+            eprintln!("  [导出] 种子写入错误: {}", e);
+        }
+    }
+
     for size in 1..max_cells {
         let gen_start = std::time::Instant::now();
         let n_shapes = cur_masks.len();
@@ -74,12 +91,23 @@ pub fn enumerate_fixed_with_symmetry(
         let n_threads = rayon::current_num_threads();
         let fold_cap = (n_shapes / n_threads / 4).max(1024);
 
-        let next_masks: Vec<Mask> = cur_masks
+        let export_enabled = export.is_some();
+
+        let (next_masks, export_data): (Vec<Mask>, Vec<(Mask, usize, bool)>) = cur_masks
             .par_iter()
             .with_min_len(if n_shapes < 500 { n_shapes } else { 16 })
             .fold(
-                || Vec::<Mask>::with_capacity(fold_cap),
-                |mut local_new, &pmask| {
+                || {
+                    (
+                        Vec::<Mask>::with_capacity(fold_cap),
+                        if export_enabled {
+                            Vec::with_capacity(fold_cap)
+                        } else {
+                            Vec::new()
+                        },
+                    )
+                },
+                |(mut local_new, mut local_exp), &pmask| {
                     // 提取坐标
                     let mut cells_r = [0usize; MAX_CELLS];
                     let mut cells_c = [0usize; MAX_CELLS];
@@ -116,6 +144,11 @@ pub fn enumerate_fixed_with_symmetry(
                         // 洞检测
                         let has_hole = poly_has_hole(canonical, can_w, can_h);
                         let md = can_w.max(can_h);
+
+                        // 导出数据收集
+                        if export_enabled {
+                            local_exp.push((canonical, md, has_hole));
+                        }
                         for n in md..=max_n {
                             let i = n - 1;
                             total_stats[i].fetch_add(1, Ordering::Relaxed);
@@ -135,16 +168,40 @@ pub fn enumerate_fixed_with_symmetry(
                         }
                     }
 
-                    local_new
+                    (local_new, local_exp)
                 },
             )
-            .reduce(Vec::new, |mut a, b| {
-                a.extend(b);
-                a
-            });
+            .reduce(
+                || (Vec::new(), Vec::new()),
+                |(mut a_m, mut a_e), (b_m, b_e)| {
+                    a_m.extend(b_m);
+                    a_e.extend(b_e);
+                    (a_m, a_e)
+                },
+            );
 
         let next_count = next_masks.len();
         let gen_elapsed = gen_start.elapsed();
+
+        // 写入导出数据（每代完成后串行写入，避免文件 I/O 竞争）
+        if let Some(ref exp) = export {
+            let write_start = std::time::Instant::now();
+            let total_export = export_data.len();
+            if !export_data.is_empty() {
+                if let Err(e) = exp.write_batch(&export_data) {
+                    eprintln!("  [导出] 写入错误: {}", e);
+                }
+            }
+            if verbose {
+                eprintln!(
+                    "  [导出] 格={:2} 写出={} 耗时={:.3}s",
+                    size,
+                    total_export,
+                    write_start.elapsed().as_secs_f64(),
+                );
+            }
+        }
+
         if verbose {
             eprintln!(
                 "  [Fixed] 格={:2} 本代={:>8} 新代={:>8} 耗时={:.3}s 速率={:.0}K/s",
@@ -190,7 +247,7 @@ pub fn enumerate_fixed_with_symmetry(
 
 /// 仅 Fixed 枚举（向后兼容）
 pub fn enumerate_fixed(max_n: usize, verbose: bool) -> Vec<RoomCount> {
-    let (fixed, _, _) = enumerate_fixed_with_symmetry(max_n, verbose);
+    let (fixed, _, _) = enumerate_fixed_with_symmetry(max_n, verbose, None);
     fixed
 }
 
@@ -316,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_fixed_n1() {
-        let (fixed, sym90, sym180) = enumerate_fixed_with_symmetry(1, false);
+        let (fixed, sym90, sym180) = enumerate_fixed_with_symmetry(1, false, None);
         assert_eq!(fixed[0].total, 1);
         // Monomino has both symmetries
         assert_eq!(sym90[0].total, 1);
@@ -326,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_fixed_n2_burnside() {
-        let (fixed, sym90, sym180) = enumerate_fixed_with_symmetry(2, false);
+        let (fixed, sym90, sym180) = enumerate_fixed_with_symmetry(2, false, None);
 
         // n=2 Fixed should be 8
         assert_eq!(fixed[1].total, 8, "Fixed n=2 should be 8");

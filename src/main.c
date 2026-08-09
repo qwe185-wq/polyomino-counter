@@ -21,15 +21,43 @@
 TimerSlot g_timers[TIMER_COUNT];
 int g_timing_enabled = 0;
 
+/* 线程安全累加 */
+void _timer_add(int id, double dt) {
+#ifdef _OPENMP
+    #pragma omp atomic
+#endif
+    g_timers[id].total_sec += dt;
+#ifdef _OPENMP
+    #pragma omp atomic
+#endif
+    g_timers[id].call_count++;
+}
+
 void timer_init(void) {
-    g_timers[TIMER_TOTAL].name    = "总耗时";
-    g_timers[TIMER_EXTRACT].name  = "掩码→坐标提取";
-    g_timers[TIMER_FRONTIER].name = "前沿计算";
-    g_timers[TIMER_GROW].name     = "扩展+构造掩码";
-    g_timers[TIMER_INVARIANT].name = "不变量预筛选";
-    g_timers[TIMER_CANONICAL].name = "One-sided 规范化";
-    g_timers[TIMER_HOLE].name     = "Flood fill 洞检测";
-    g_timers[TIMER_HASHSET].name  = "哈希集合插入";
+    g_timers[TIMER_TOTAL].name       = "总耗时";
+    g_timers[TIMER_EXTRACT].name     = "提取坐标+包围盒";
+    g_timers[TIMER_FRONTIER].name    = "前沿计算";
+    g_timers[TIMER_GROW].name        = "扩展+构造掩码";
+    g_timers[TIMER_ORIENT_LOOKUP].name = "方向集查找";
+    g_timers[TIMER_CANONICAL].name   = "规范化(4方向)";
+    g_timers[TIMER_HOLE].name        = "Flood fill 洞检测";
+    g_timers[TIMER_HS_INSERT].name   = "方向集插入";
+    g_timers[TIMER_WAIT_LOCK].name   = "等锁(临界区排队)";
+    g_timers[TIMER_MERGE].name       = "代末合并";
+}
+
+double timer_gen_start(void) {
+    return TIMER_NOW();
+}
+
+void timer_gen_print(int size, double t0, int wait_ms,
+                     int nshapes, int gen) {
+    double elapsed = TIMER_NOW() - t0;
+    double rate = (elapsed > 0) ? (nshapes / elapsed / 1000.0) : 0;
+    fprintf(stderr,
+            "  [计时] 格=%2d 耗时=%6.1fs  等锁=%5.1fs  "
+            "形状=%d 新=%d  速率=%.0fK/s\n",
+            size, elapsed, wait_ms / 1000.0, nshapes, gen, rate);
 }
 
 void timer_report(void) {

@@ -3,6 +3,10 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod bit_utils;
 mod burnside;
+mod dynamic;
+mod dynamic_export;
+mod dynamic_frontier;
+mod dynamic_transfer;
 mod export;
 mod fixed;
 mod frontier_export;
@@ -36,11 +40,11 @@ enum CompressionBackend {
 }
 
 fn parse_n(value: &str) -> Result<usize, String> {
-    value
+    let n = value
         .parse::<usize>()
-        .ok()
-        .filter(|n| (1..=MAX_N).contains(n))
-        .ok_or_else(|| format!("n 必须在1..={MAX_N}范围内"))
+        .map_err(|_| "n必须为正整数".to_owned())?;
+    dynamic::layout(n).map_err(|error| error.to_string())?;
+    Ok(n)
 }
 
 #[derive(Parser, Debug)]
@@ -77,6 +81,9 @@ struct Args {
 }
 
 fn run(args: Args) -> io::Result<()> {
+    if args.n > MAX_N {
+        return run_dynamic(args);
+    }
     let total_start = Instant::now();
     let algorithm = match args.algorithm {
         Algorithm::Auto if args.export => Algorithm::Frontier,
@@ -190,6 +197,82 @@ fn run(args: Args) -> io::Result<()> {
     Ok(())
 }
 
+fn run_dynamic(args: Args) -> io::Result<()> {
+    let start = Instant::now();
+    let algorithm = match args.algorithm {
+        Algorithm::Auto if args.export => Algorithm::Frontier,
+        Algorithm::Auto => Algorithm::Transfer,
+        algorithm => algorithm,
+    };
+    if !matches!(algorithm, Algorithm::Transfer | Algorithm::Frontier) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput,
+            "bfs/canonical/redelmeier为n≤6的固定位图参考算法；动态尺寸请使用auto、transfer或frontier"));
+    }
+    if args.export && algorithm == Algorithm::Transfer {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "前沿DP只计数；导出请使用frontier或auto",
+        ));
+    }
+    let mode = if args.no_compress {
+        dynamic_export::Mode::Raw
+    } else if args.compression_backend == CompressionBackend::Native {
+        dynamic_export::Mode::Native(args.compression_level)
+    } else {
+        dynamic_export::Mode::SevenZip(args.compression_level)
+    };
+    let mut output = if args.export {
+        Some(dynamic_export::Export::new(&args.export_dir, args.n, mode)?)
+    } else {
+        None
+    };
+    let title = if algorithm == Algorithm::Transfer {
+        "动态前沿DP + 旋转轨道 + 任意精度Burnside"
+    } else {
+        "动态前沿状态图回溯导出"
+    };
+    println!("多联骨牌房间计数 — {title}\nn={}", args.n);
+    let compute_start = Instant::now();
+    let results = if algorithm == Algorithm::Transfer {
+        dynamic_transfer::enumerate_transfer(args.n, args.verbose)?
+    } else {
+        dynamic_frontier::enumerate_frontier(args.n, args.verbose, &mut |mask, md, hole| {
+            if let Some(output) = &mut output {
+                output.write(mask, md, hole)
+            } else {
+                Ok(())
+            }
+        })?
+    };
+    let elapsed = compute_start.elapsed();
+    if results.len() != args.n || !dynamic::verify_results(&results) {
+        return Err(io::Error::other("动态计数一致性/已知结果校验失败"));
+    }
+    for result in &results {
+        println!("{result}");
+    }
+    println!("算法耗时: {:.6}s", elapsed.as_secs_f64());
+    if let Some(output) = &mut output {
+        let finish_start = Instant::now();
+        output.finish(&results.last().unwrap().total)?;
+        let label = match mode {
+            dynamic_export::Mode::Raw => "导出收尾耗时",
+            dynamic_export::Mode::Native(_) => "ZIP收尾耗时",
+            dynamic_export::Mode::SevenZip(_) => "压缩耗时",
+        };
+        println!("{label}: {:.6}s", finish_start.elapsed().as_secs_f64());
+        if matches!(mode, dynamic_export::Mode::Native(_)) {
+            println!("流式ZIP压缩已计入算法耗时");
+        }
+        println!(
+            "导出目录: {}（v3动态位图；通过dataset.json读取）",
+            args.export_dir.display()
+        );
+    }
+    println!("总耗时: {:.6}s", start.elapsed().as_secs_f64());
+    Ok(())
+}
+
 fn main() -> ExitCode {
     match run(Args::parse()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -206,5 +289,20 @@ mod cli_tests {
     #[test]
     fn no_implicit_large_run() {
         assert!(Args::try_parse_from(["room-count"]).is_err());
+    }
+    #[test]
+    fn accepts_dynamic_dimensions_without_starting_enumeration() {
+        for n in ["7", "8", "9", "17", "100"] {
+            assert_eq!(
+                Args::try_parse_from(["room-count", n])
+                    .unwrap()
+                    .n
+                    .to_string(),
+                n
+            );
+        }
+        for n in ["0", "-1", "18446744073709551615"] {
+            assert!(Args::try_parse_from(["room-count", n]).is_err());
+        }
     }
 }

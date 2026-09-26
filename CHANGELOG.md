@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Dynamic dimensions (2026-09-26)
+- n>6默认切换动态前沿、任意宽位图和BigUint精确计数，取消主程序的小尺寸上限；n≤6快路径保留。
+- 新增动态完整枚举与v3单份分类输出，显式stride/record_bytes、十进制字符串计数、ZIP64及动态chunk编号。
+- Python读取器兼容v1/v2/v3，分类流关联根清单，几何/洞判定使用数据集步长。
+- 修正满宽动态位图的Euler跨行位移；8/9尺寸与独立洪泛对照通过。
+- n=7实际计数及冻结参考DP交叉核对一致：total=1185652433093，no_hole=144608553854，has_hole=1041043879239。n≥8整盘计数和n≥7全集导出未实跑。
+
 ### Complete export follow-up (2026-09-26)
 - 完整导出改为前沿状态图回溯，按宽共享拓扑图，前缀并行且不保存全局形状集合；保留两种BFS和新Redelmeier作为参考。
 - `format_version: 2` 每形状只存所属分类，以清单定义逻辑全集；不再重复写all副本。读取器兼容新旧格式并按256 KiB分批解码。

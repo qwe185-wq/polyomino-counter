@@ -1,10 +1,12 @@
 # Rust 计数与导出
 
-当前默认计数路线是 **前沿连通性 DP + 旋转轨道 + Burnside**；默认导出使用 **前沿状态图回溯**，每个形状仅写入所属分类。n 是必填参数，支持范围1..6。n=6完整裸导出已在128 MiB Job上限内通过，并逐条验收；普通回归与探针仍不枚举n=6。
+当前默认计数路线是 **前沿连通性 DP + 旋转轨道 + Burnside**；默认导出使用 **前沿状态图回溯**，每个形状仅写入所属分类。n 是必填正整数；n≤6使用既有优化路线，n>6自动切换动态前沿、BigUint位图与精确计数，无小尺寸硬上限。n=6完整裸导出和n=7完整纯计数已验证；普通回归不启动完整n≥6枚举。
 
 ```powershell
 cargo build --release --locked
 cargo run --release -- 5
+cargo run --release -- 7
+cargo run --release -- 9 --algorithm transfer
 cargo run --release -- 5 --algorithm bfs
 cargo run --release -- 5 --algorithm canonical
 cargo run --release -- 5 --algorithm frontier
@@ -29,3 +31,5 @@ cargo test --release --locked
 `--jensen` 是新DP的兼容别名，旧实验 DFS/Jensen 源码不编入主程序。新数据集必须写入新目录，默认原生流式 ZIP 等级1，无需外部7-Zip；`--compression-backend 7z` 保留原压缩器，`--no-compress` 输出裸文件。原生压缩计入算法耗时，ZIP收尾单独报告；整进程时间用于比较完整导出。
 
 `read_shapes.py` 可直接读取数据集根目录，按 `dataset.json` 中的 `streams` 顺序拼接逻辑全集；旧v1、ZIP和bin输入仍兼容。
+
+n>6使用v3清单（`uint-le-fixed`、动态`stride/record_bytes`、十进制字符串计数、ZIP64）。已实测n=7总数1,185,652,433,093，与旧参考DP一致；n≥8整盘结果及n≥7全集导出未实跑。动态路线的边界与验证详见[动态尺寸记录](../docs/dynamic-dimensions-2026-09-26.md)。旧参考算法 `bfs/canonical/redelmeier` 与历史有界基准脚本仍只处理n≤6；动态入口使用 `auto/transfer/frontier`，不套用资源限制。

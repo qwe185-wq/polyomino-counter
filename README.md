@@ -7,6 +7,8 @@ Rust 主程序提供两条默认路线：
 - **只计数：前沿连通性 DP + 旋转轨道枚举 + Burnside**，不保存每个形状。
 - **导出：前沿状态图回溯（frontier）**，共享后缀可行性表，逐条生成最小旋转代表，不保存全局形状集合。
 
+**现在支持 n=7、8、9…的动态尺寸**。n≤6沿用已优化的固定位图路线；n>6自动采用动态前沿、任意宽位图和任意精度计数，不设置经验性的内存、时间或小尺寸上限。只拒绝零、非法参数及机器地址/尺寸运算溢出。旧 `bfs/canonical/redelmeier` 参考实现仍限n≤6；大尺寸使用 `auto/transfer/frontier`。
+
 `canonical`（one-sided BFS）、`bfs`（Fixed BFS）和新 `redelmeier` 可显式选择，作为交叉验证或低内存参考。旧 `jensen.rs`、`redelmeier.rs` 保留为历史实验源码，不再编入生产入口；新的 Redelmeier 实现在 `redelmeier_export.rs`。旧 `--jensen` 参数调用正确 DP，`--dfs` 已移除。C 目录保留历史实现。
 
 ## 构建与使用
@@ -19,6 +21,10 @@ cargo build --release --locked
 cargo run --release -- 5
 cargo run --release -- 5 --algorithm canonical
 cargo run --release -- 5 --algorithm bfs --verbose
+
+# 动态尺寸：完整计数使用BigUint，不会按u64取模
+cargo run --release -- 7
+cargo run --release -- 9 --algorithm transfer
 
 # 每次使用新的目录；默认 ZIP 压缩等级1
 cargo run --release -- 5 --export --export-dir output_n5_new
@@ -36,7 +42,9 @@ cargo test --release --locked
 cargo test --locked
 ```
 
-实现的尺寸上限仍为 6。n=6 纯计数已通过32 MiB Job上限；完整裸导出在8线程、128 MiB上限下成功，单次整进程5.27秒、峰值Job提交内存96.25 MiB。普通回归测试和 `transfer_probe` 不会自动运行 n=6。
+动态路线的n=7完整计数已实跑，并与独立保留的旧DP参考（仅将尺寸常量改为7）一致：总数1,185,652,433,093，无洞144,608,553,854，有洞1,041,043,879,239。n≥8整盘计数、n≥7完整形状导出尚未实跑；动态表示通过小规模全集与大位宽边界测试，详见[动态尺寸实现与验证](docs/dynamic-dimensions-2026-09-26.md)。普通回归不会启动完整n≥6枚举。
+
+之前n=6的受限验证继续有效：纯计数通过32 MiB Job上限；完整裸导出在8线程、128 MiB上限下成功，单次整进程5.27秒、峰值Job提交内存96.25 MiB。
 
 Windows 下需要有界运行时，先构建，再执行以下命令；脚本默认 n=5、512 MiB、30秒，n=6必须显式指定：
 
@@ -49,6 +57,8 @@ Windows 下需要有界运行时，先构建，再执行以下命令；脚本默
 ```
 
 内存限制仅由该脚本的 Job Object 强制执行；直接调用主程序不会自动套用这个上限。
+
+这两个历史基准脚本只验证已知的n≤6。动态尺寸可直接调用程序，例如 `./target/release/room-count.exe 7 --export --no-compress --export-dir output_n7_new`；主程序不施加这些脚本的资源上限。
 
 默认 `--compression-backend native` 使用Rust `zip`/`flate2` 流式压缩，无需外部程序。选择 `7z` 时，Windows 自动检测常用安装位置，否则从 PATH 查找 `7z`；可用 `ROOM_COUNT_7Z` 指定可执行文件。等级0为不压缩ZIP，默认等级1优先速度。
 
@@ -85,6 +95,7 @@ ZIP 总体积的一个 n=5 样本：旧 ZIP9 2.60 MB，新 ZIP9 2.47 MB，新 ZI
 | 4 | 2,404 | 1,899 | 505 |
 | 5 | 520,818 | 267,976 | 252,842 |
 | 6（纯计数及完整裸导出已受限验收） | 410,964,612 | 112,877,832 | 298,086,780 |
+| 7（动态纯计数已交叉验证） | 1,185,652,433,093 | 144,608,553,854 | 1,041,043,879,239 |
 
 新 DP、Fixed BFS、one-sided BFS 在 n≤5 的三类计数一致。测试用独立坐标/洪泛 oracle 穷举 n≤4，验证形状、旋转、洞、导出集合；还校验小矩形 DP 和旋转固定点。实际 n=5 旧版 ZIP9、新版 ZIP9/ZIP1 各有520,818个不重复形状，完整集合相同。
 
@@ -93,6 +104,8 @@ ZIP 总体积的一个 n=5 样本：旧 ZIP9 2.60 MB，新 ZIP9 2.47 MB，新 ZI
 ## 数据格式与兼容性
 
 每个 mask 为8字节 u64 little-endian，格子 `(row,col)` 对应 bit `row*8+col`，紧包围盒左上对齐，取4个旋转中位图值最小的代表。每10,000,000条记录分一个 chunk。
+
+以上是n≤6的v2格式。**n>6输出v3格式**：无符号小端整数，`stride=max(8,n)`，每记录 `record_bytes=max(8,ceil(n*stride/8))` 字节；两者都写入清单。n=7/8仍为8字节，n=9为11字节，n=17为37字节。`count`及分类流条数以十进制字符串保存，避免JSON工具丢失大整数精度。ZIP条目启用ZIP64；每形状仍只存一次。读取新数据应使用根目录或保留其关联清单，不可脱离元数据假定每条8字节。
 
 ```text
 output_n5_new/
@@ -122,6 +135,7 @@ python read_shapes.py rust/output_n5_new/with_holes/n05_fixed.zip --ascii --limi
 ## 主要代码
 
 - `rust/src/transfer.rs`：前沿分量状态、增量欧拉特征、差分去平移、旋转轨道。
+- `rust/src/dynamic.rs`、`dynamic_transfer.rs`、`dynamic_frontier.rs`、`dynamic_export.rs`：动态尺寸类型、计数、逐形状枚举和v3输出。
 - `rust/src/fixed.rs`：两种 BFS、位前沿、分块任务、局部统计和流式导出。
 - `rust/src/frontier_export.rs`：共享拓扑图与后缀表、互斥前缀并行回溯。
 - `rust/src/redelmeier_export.rs`：无全局去重表的串行半平面生长枚举。

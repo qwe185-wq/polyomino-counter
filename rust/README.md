@@ -1,6 +1,12 @@
-# Rust 计数与导出
+# Polyomino Counter / Rust — 动态尺寸、任意精度与旋转商图研究
 
-当前默认计数路线是 **前沿连通性 DP + 旋转轨道 + Burnside**；默认导出使用 **前沿状态图回溯**，每个形状仅写入所属分类。n 是必填正整数；n≤6使用既有优化路线，n>6自动切换动态前沿、动态位图与BigUint精确计数，无小尺寸硬上限。n=6完整裸导出和n=7完整纯计数已验证；普通回归不启动完整n≥6枚举。
+**当前分支：`codex/dynamic-n-20260926`。** 在 main 的动态计数和导出能力上，继续研究旋转固定集商图，加入紧凑标签、数值特化和 split/single/two/center 四种显式商图模式。
+
+第二轮改进主要作用于显式 quotient 内核；默认 auto 的内核选择未改变。局部内核速度与内存收益不等于完整 n 计数的同等收益，也不代表已完成 n=14。
+
+[分支导航](../docs/BRANCHES.md) · [完整项目说明](../README.md)
+
+当前默认计数路线是 **前沿连通性 DP + 旋转轨道 + Burnside**；默认导出使用 **前沿状态图回溯**，每个形状仅写入所属分类。n 是必填正整数；n≤6使用既有优化路线，n>6自动切换动态前沿、动态位图与BigUint精确计数，无小尺寸硬上限。n=6完整裸导出已验证，后续完整纯计数已记录到n=13（验证强度见根目录README）；普通回归不启动完整n≥6枚举。
 
 ```powershell
 cargo build --release --locked
@@ -15,7 +21,7 @@ cargo run --release -- 5 --export --no-compress --export-dir output_n5_raw
 cargo run --release -- 5 --export --export-dir output_n5_zip
 cargo test --release --locked
 
-# 已有本次 n=6 授权；32 MiB硬提交内存上限，默认30秒超时
+# 显式选择 n=6，使用脚本的硬资源上限；32 MiB硬提交内存上限，默认30秒超时
 ./scripts/measure-transfer.ps1 -Exe ./target/release/room-count.exe -N 6 -MemoryMiB 32
 
 # 完整导出：8线程，128 MiB硬上限，默认60秒超时，保留数据与日志

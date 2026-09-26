@@ -147,3 +147,24 @@ fn padded_holes_match_independent_background_flood() {
     assert!(checked_holes > 4);
     assert!(checked_no_holes >= 4);
 }
+
+#[test]
+fn orbit_dp_matches_gray_counts_on_rectangles_and_quarter_turns() {
+    for (w, h, quarter) in [
+        (5, 5, false),
+        (5, 6, false),
+        (6, 5, false),
+        (3, 9, false),
+        (4, 8, false),
+        (8, 4, false),
+        (8, 8, true),
+    ] {
+        let reference = symmetric_bbox(w, h, quarter).unwrap();
+        let (no_hole, has_hole) = crate::symmetric_transfer::count_fixed(w, h, quarter).unwrap();
+        assert_eq!(no_hole, reference.no_hole, "{w}x{h} quarter={quarter}");
+        assert_eq!(has_hole, reference.has_hole, "{w}x{h} quarter={quarter}");
+    }
+    let (no_hole, has_hole) = crate::symmetric_transfer::count_fixed(1, 65, false).unwrap();
+    assert_eq!(no_hole, BigUint::from(1u8));
+    assert_eq!(has_hole, BigUint::default());
+}

@@ -4,6 +4,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod bit_utils;
 mod burnside;
 mod dynamic;
+mod dynamic_bitset;
 mod dynamic_export;
 mod dynamic_frontier;
 mod dynamic_transfer;
@@ -13,6 +14,7 @@ mod frontier_export;
 mod hashset;
 mod redelmeier_export;
 mod symmetric;
+mod symmetric_transfer;
 mod transfer;
 mod types;
 #[cfg(test)]

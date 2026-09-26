@@ -360,6 +360,7 @@ fn hole_padded(mask: u128, stride: usize) -> bool {
     edges + 1 > vertices + faces
 }
 
+#[cfg(test)]
 fn connected_large(
     mask: &[bool],
     width: usize,
@@ -394,6 +395,7 @@ fn connected_large(
     reached == mask.iter().filter(|&&cell| cell).count()
 }
 
+#[cfg(test)]
 fn hole_large(mask: &[bool], width: usize, height: usize) -> Result<bool> {
     let mut chi = 0i128;
     for row in 0..height {
@@ -475,6 +477,21 @@ where
 }
 
 fn symmetric_bbox(width: usize, height: usize, quarter: bool) -> Result<Counts> {
+    if width == 0 || height == 0 || (quarter && width != height) {
+        return Ok(Counts::default());
+    }
+    let area = width.checked_mul(height).ok_or_else(|| overflow("网格面积"))?;
+    let orbit_count = area.div_ceil(if quarter { 4 } else { 2 });
+    // 小轨道集的直接位运算更轻；大轨道集用前沿状态合并消除指数级重复。
+    // 这是算法选择阈值，不限制输入尺寸；n≤7 保持既有快速路径。
+    if (width > 7 || height > 7) && orbit_count > 25 {
+        let (no_hole, has_hole) = crate::symmetric_transfer::count_fixed(width, height, quarter)?;
+        return Ok(Counts { no_hole, has_hole });
+    }
+    symmetric_bbox_gray(width, height, quarter)
+}
+
+fn symmetric_bbox_gray(width: usize, height: usize, quarter: bool) -> Result<Counts> {
     if quarter && width != height {
         return Ok(Counts::default());
     }
@@ -563,27 +580,11 @@ fn symmetric_bbox(width: usize, height: usize, quarter: bool) -> Result<Counts> 
         }
     } else {
         let mut counter = filled_vec(orbits.len(), false)?;
-        let area = width
-            .checked_mul(height)
-            .ok_or_else(|| overflow("网格面积"))?;
-        let mut mask = filled_vec(area, false)?;
-        let mut seen = filled_vec(area, false)?;
-        let mut stack = Vec::new();
+        let mut grid = crate::dynamic_bitset::DynamicGrid::new(width, height)?;
         while let Some(changed) = advance_gray(&mut counter) {
-            for &cell in &orbits[changed] {
-                mask[cell] = !mask[cell];
-            }
-            let top = mask[..width].iter().any(|&v| v);
-            let bottom = mask[area - width..].iter().any(|&v| v);
-            let left = (0..height).any(|row| mask[row * width]);
-            let right = (0..height).any(|row| mask[row * width + width - 1]);
-            if top
-                && bottom
-                && left
-                && right
-                && connected_large(&mask, width, height, &mut seen, &mut stack)
-            {
-                if hole_large(&mask, width, height)? {
+            grid.toggle_cells(&orbits[changed]);
+            if grid.touches_required_boundary(quarter) && grid.is_connected() {
+                if grid.has_hole() {
                     counts.has_hole += 1u32;
                 } else {
                     counts.no_hole += 1u32;

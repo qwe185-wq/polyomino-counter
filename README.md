@@ -127,3 +127,10 @@ python read_shapes.py rust/output_n5_new/all_fixed.zip --ascii --limit 10
 - `rust/src/transfer_reference.rs`：冻结的第一批 DP，仅编入测试用于差分校验。
 
 MIT。
+
+## AI 辅助工具
+
+- **DeepSeek**
+- **OpenAI Codex**
+
+以上工具用于辅助项目开发与文档整理。项目由 [qwe185-wq](https://github.com/qwe185-wq) 维护；工具署名与 GitHub 根据提交记录生成的贡献者列表分别管理。

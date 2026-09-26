@@ -32,4 +32,4 @@ cargo test --release --locked
 
 `read_shapes.py` 可直接读取数据集根目录，按 `dataset.json` 中的 `streams` 顺序拼接逻辑全集；旧v1、ZIP和bin输入仍兼容。
 
-n>6使用v3清单（`uint-le-fixed`、动态`stride/record_bytes`、十进制字符串计数、ZIP64）。已实测n=7总数1,185,652,433,093，与旧参考DP一致；n≥8整盘结果及n≥7全集导出未实跑。动态路线的边界与验证详见[动态尺寸记录](../docs/dynamic-dimensions-2026-09-26.md)。旧参考算法 `bfs/canonical/redelmeier` 与历史有界基准脚本仍只处理n≤6；动态入口使用 `auto/transfer/frontier`，不套用资源限制。
+n>6使用v3清单（`uint-le-fixed`、动态`stride/record_bytes`、十进制字符串计数、ZIP64）。已实测n=7总数1,185,652,433,093，与旧参考DP一致；n=8纯计数总数12,575,973,909,316,634，优化前后分类一致。n≥9完整计数及n≥7全集导出未完成验证。动态路线的边界与验证详见[动态尺寸记录](../docs/dynamic-dimensions-2026-09-26.md)，大尺寸位运算改进见[大尺寸计数优化](../docs/large-count-optimization-2026-09-26.md)。旧参考算法 `bfs/canonical/redelmeier` 与历史有界基准脚本仍只处理n≤6；动态入口使用 `auto/transfer/frontier`，不套用资源限制。

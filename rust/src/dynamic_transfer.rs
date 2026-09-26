@@ -321,6 +321,45 @@ fn hole_small(mask: u64) -> bool {
     edges + 1 > vertices + faces
 }
 
+// 每行末尾留一位，横向位移不会把相邻两行误接起来。
+// 调用方保证 (width+1)*(height+1)<=128，四个顶点位移均在 u128 内。
+fn connected_padded(mask: u128, stride: usize) -> bool {
+    let mut seen = mask & mask.wrapping_neg();
+    let mut frontier = seen;
+    while frontier != 0 {
+        let adjacent =
+            ((frontier << 1) | (frontier >> 1) | (frontier << stride) | (frontier >> stride))
+                & mask;
+        frontier = adjacent & !seen;
+        seen |= frontier;
+    }
+    seen == mask
+}
+
+// 紧凑布局的横向位移必须先去掉行首/行尾，否则会跨行相接。
+// 仅用于 padded 分支内面积不超过 64、且宽度小于 64 的网格。
+fn connected_compact(mask: u64, width: usize, left: u64, right: u64) -> bool {
+    let mut seen = mask & mask.wrapping_neg();
+    let mut frontier = seen;
+    while frontier != 0 {
+        let adjacent = (((frontier & !right) << 1)
+            | ((frontier & !left) >> 1)
+            | (frontier << width)
+            | (frontier >> width))
+            & mask;
+        frontier = adjacent & !seen;
+        seen |= frontier;
+    }
+    seen == mask
+}
+
+fn hole_padded(mask: u128, stride: usize) -> bool {
+    let faces = mask.count_ones();
+    let edges = (mask | mask << stride).count_ones() + (mask | mask << 1).count_ones();
+    let vertices = (mask | mask << 1 | mask << stride | mask << (stride + 1)).count_ones();
+    edges + 1 > vertices + faces
+}
+
 fn connected_large(
     mask: &[bool],
     width: usize,
@@ -396,14 +435,53 @@ fn advance_gray(bits: &mut [bool]) -> Option<usize> {
     }
 }
 
+fn count_padded_orbits<F>(
+    masks: &[u128],
+    top: u128,
+    side: u128,
+    stride: usize,
+    mut connected: F,
+) -> Result<Counts>
+where
+    F: FnMut(usize, u128, bool) -> bool,
+{
+    // padded 尺寸上限使面积至多 125，半转轨道至多 63 个。
+    // 四分之一转的轨道更少，非空候选数至多 2^63-1。
+    let mut no_hole = 0u64;
+    let mut has_hole = 0u64;
+    let mut mask = 0u128;
+    // 二进制序号的末尾零位数正是下一步 Gray 码翻转的轨道。
+    let candidates = 1u64 << masks.len();
+    for ordinal in 1..candidates {
+        let changed = ordinal.trailing_zeros() as usize;
+        mask ^= masks[changed];
+        let on_boundary = mask & top != 0 && mask & side != 0;
+        if connected(changed, mask, on_boundary) {
+            if hole_padded(mask, stride) {
+                has_hole = has_hole
+                    .checked_add(1)
+                    .ok_or_else(|| overflow("对称有洞计数"))?;
+            } else {
+                no_hole = no_hole
+                    .checked_add(1)
+                    .ok_or_else(|| overflow("对称无洞计数"))?;
+            }
+        }
+    }
+    Ok(Counts {
+        no_hole: BigUint::from(no_hole),
+        has_hole: BigUint::from(has_hole),
+    })
+}
+
 fn symmetric_bbox(width: usize, height: usize, quarter: bool) -> Result<Counts> {
     if quarter && width != height {
         return Ok(Counts::default());
     }
     let orbits = rotation_orbits(width, height, quarter)?;
-    let mut counter = filled_vec(orbits.len(), false)?;
     let mut counts = Counts::default();
     if width <= 7 && height <= 7 {
+        let mut counter = filled_vec(orbits.len(), false)?;
         let masks: Vec<u64> = orbits
             .iter()
             .map(|orbit| {
@@ -440,7 +518,51 @@ fn symmetric_bbox(width: usize, height: usize, quarter: bool) -> Result<Counts> 
         }
         counts.no_hole = BigUint::from(small_no_hole);
         counts.has_hole = BigUint::from(small_has_hole);
+    } else if width
+        .checked_add(1)
+        .and_then(|stride| height.checked_add(1)?.checked_mul(stride))
+        .is_some_and(|bits| bits <= 128)
+    {
+        let stride = width + 1;
+        let masks: Vec<u128> = orbits
+            .iter()
+            .map(|orbit| {
+                orbit.iter().fold(0u128, |mask, &cell| {
+                    mask | (1u128 << ((cell / width) * stride + cell % width))
+                })
+            })
+            .collect();
+        let top = (1u128 << width) - 1;
+        let mut left = 0u128;
+        for row in 0..height {
+            left |= 1u128 << (row * stride);
+        }
+        // 半转将上边映到下边、左边映到右边；四分之一转将上边映到其余三边。
+        let side = if quarter { top } else { left };
+        let area = width * height; // padded 尺寸条件已保证乘积可表示。
+        if area <= 64 {
+            let compact_masks: Vec<u64> = orbits
+                .iter()
+                .map(|orbit| orbit.iter().fold(0u64, |mask, &cell| mask | (1u64 << cell)))
+                .collect();
+            let mut compact_left = 0u64;
+            let mut compact_right = 0u64;
+            for row in 0..height {
+                compact_left |= 1u64 << (row * width);
+                compact_right |= 1u64 << (row * width + width - 1);
+            }
+            let mut compact = 0u64;
+            counts = count_padded_orbits(&masks, top, side, stride, |changed, _, on_boundary| {
+                compact ^= compact_masks[changed];
+                on_boundary && connected_compact(compact, width, compact_left, compact_right)
+            })?;
+        } else {
+            counts = count_padded_orbits(&masks, top, side, stride, |_, mask, on_boundary| {
+                on_boundary && connected_padded(mask, stride)
+            })?;
+        }
     } else {
+        let mut counter = filled_vec(orbits.len(), false)?;
         let area = width
             .checked_mul(height)
             .ok_or_else(|| overflow("网格面积"))?;
@@ -471,6 +593,10 @@ fn symmetric_bbox(width: usize, height: usize, quarter: bool) -> Result<Counts> 
     }
     Ok(counts)
 }
+
+#[cfg(test)]
+#[path = "dynamic_transfer/optimization_tests.rs"]
+mod optimization_tests;
 
 fn difference(square: &Counts, previous: &Counts, strip: &Counts) -> Result<Counts> {
     let subtract = |a: &BigUint, b: &BigUint, s: &BigUint| -> Result<BigUint> {
@@ -622,6 +748,126 @@ mod tests {
         ring[3] = false;
         assert!(connected_large(&ring, width, height, &mut seen, &mut stack));
         assert!(!hole_large(&ring, width, height).unwrap());
+    }
+
+    #[test]
+    fn padded_geometry_matches_boolean_reference_at_bit_boundaries() {
+        let mut random = 0x9e37_79b9_7f4a_7c15u64;
+        for (width, height) in [(8, 8), (8, 9), (9, 8), (10, 10), (7, 15), (1, 63), (2, 41)] {
+            let stride = width + 1;
+            assert!((width + 1) * (height + 1) <= 128);
+            let area = width * height;
+            let mut mask = vec![false; area];
+            let mut seen = vec![false; area];
+            let mut stack = Vec::new();
+            for sample in 0..512 {
+                for cell in 0..area {
+                    random ^= random << 13;
+                    random ^= random >> 7;
+                    random ^= random << 17;
+                    mask[cell] = match sample {
+                        0 => true,
+                        1 => cell == area - 1,
+                        _ => random & 1 != 0,
+                    };
+                }
+                let mut packed = 0u128;
+                for (cell, &occupied) in mask.iter().enumerate() {
+                    if occupied {
+                        packed |= 1u128 << ((cell / width) * stride + cell % width);
+                    }
+                }
+                if packed == 0 {
+                    continue;
+                }
+                assert_eq!(
+                    connected_padded(packed, stride),
+                    connected_large(&mask, width, height, &mut seen, &mut stack),
+                    "连通性: {width}×{height}, 样本 {sample}"
+                );
+                assert_eq!(
+                    hole_padded(packed, stride),
+                    hole_large(&mask, width, height).unwrap(),
+                    "Euler 特征数: {width}×{height}, 样本 {sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compact_connectivity_matches_boolean_reference_at_word_boundary() {
+        let mut random = 0xd1b5_4a32_d192_ed03u64;
+        for (width, height) in [(63, 1), (1, 63), (2, 32), (4, 16), (8, 8)] {
+            let area = width * height;
+            assert!(area <= 64 && (width + 1) * (height + 1) <= 128);
+            let mut mask = vec![false; area];
+            let mut seen = vec![false; area];
+            let mut stack = Vec::new();
+            let mut left = 0u64;
+            let mut right = 0u64;
+            for row in 0..height {
+                left |= 1u64 << (row * width);
+                right |= 1u64 << (row * width + width - 1);
+            }
+            for sample in 0..512 {
+                for cell in 0..area {
+                    random ^= random << 13;
+                    random ^= random >> 7;
+                    random ^= random << 17;
+                    mask[cell] = match sample {
+                        0 => true,
+                        1 => cell == area - 1,
+                        2 => cell == width - 1 || cell == width,
+                        _ => random & 1 != 0,
+                    };
+                }
+                let compact = mask
+                    .iter()
+                    .enumerate()
+                    .fold(0u64, |bits, (cell, &occupied)| {
+                        if occupied {
+                            bits | (1u64 << cell)
+                        } else {
+                            bits
+                        }
+                    });
+                if compact == 0 {
+                    continue;
+                }
+                assert_eq!(
+                    connected_compact(compact, width, left, right),
+                    connected_large(&mask, width, height, &mut seen, &mut stack),
+                    "{width}×{height}, 样本 {sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn padded_quarter_turn_matches_boolean_reference() {
+        let (width, height) = (8, 8);
+        let orbits = rotation_orbits(width, height, true).unwrap();
+        let mut counter = vec![false; orbits.len()];
+        let mut mask = vec![false; width * height];
+        let mut seen = vec![false; mask.len()];
+        let mut stack = Vec::new();
+        let mut expected = Counts::default();
+        while let Some(changed) = advance_gray(&mut counter) {
+            for &cell in &orbits[changed] {
+                mask[cell] = !mask[cell];
+            }
+            if !mask[..width].iter().any(|&cell| cell)
+                || !connected_large(&mask, width, height, &mut seen, &mut stack)
+            {
+                continue;
+            }
+            if hole_large(&mask, width, height).unwrap() {
+                expected.has_hole += 1u32;
+            } else {
+                expected.no_hole += 1u32;
+            }
+        }
+        assert_eq!(symmetric_bbox(width, height, true).unwrap(), expected);
     }
 
     #[test]

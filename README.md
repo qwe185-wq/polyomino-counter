@@ -1,128 +1,81 @@
-# room-count — 多联骨牌房间计数
+# Polyomino Counter — 前沿连通性 DP 计数原型
 
-统计 n×n 正方形网格中用墙和门围成的不同房间形状的数量。
+**当前分支：`codex/transfer-20260926`。** 保存首次引入 transfer.rs 的独立算法原型及遍历优化，便于研究从形状枚举转向状态计数的过程。
 
-## 问题描述
+前沿 DP 通过 transfer_probe 单独运行；本分支主程序仍默认使用 Fixed BFS，不能使用后续版本的 --algorithm transfer。
 
-在 n×n（n ≤ 6）的正方形网格中：
-- 每条边可以放置**墙**、**门**或**不放**
-- 墙和门围成的封闭连通区域称为**房间**
-- 房间必须有至少一个门，内部不能有门
-- 整个网格只有一个房间
-- 房间对方向与位置不敏感（**One-sided**：允许旋转+平移，禁止翻转）
+[分支导航与版本选择](docs/BRANCHES.md) · [GitHub 仓库](https://github.com/qwe185-wq/polyomino-counter) · [本分支技术依据](rust/src/transfer.rs)
 
-问题等价于：统计所有能嵌入 n×n 网格的 **one-sided polyomino**，并分类为有洞/无洞。
+## 问题定义
 
-## 实现
+统计可嵌入 n×n 网格的非空四邻接连通格子集合，合并平移与旋转，镜像保持不同。n 是最大包围盒边长，不是格子数。输出总数、无洞数和有洞数；洞按背景四邻接可达性判断，对角缝隙不算通道。本程序只计形状，不另外计算门或墙的布置。
 
-| 语言 | 算法 | n=5 | n=6 | 内存 |
-|------|------|-----|-----|------|
-| **C** | BFS + Burnside | 0.59s | 6min (未完成) | ~8GB |
-| **Rust** | BFS + Burnside + Rayon | 0.21s | 328s | ~8GB |
-| Rust (实验) | Redelmeier DFS | ~37s | — | O(n) 栈 |
-| Rust (实验) | Jensen 转移矩阵 | <1ms | — | 极小 |
-| **Rust + export** | BFS + One-sided 导出 + 7z | <1s | ~655s | ~9GB |
+## 本分支实现与限制
 
-## 构建
+- `rust/src/transfer.rs`：前沿连通性状态、欧拉特征累计、平移归一化和旋转固定集计数原型。
+- `rust/src/bin/transfer_probe.rs`：独立运行前沿 DP，固定检查 n=1..5，并保留计时结果避免编译优化消去工作。
+- `rust/src/main.rs`：仍为早期 Fixed BFS + Burnside 主入口，`--jensen`、`--dfs` 调用历史实验实现，不能当作本分支新 transfer 模块入口。
+- `rust/src/fixed.rs` 与 `export.rs`：枚举、旋转代表输出及外部 7-Zip 压缩，尚无后续 `--algorithm`、`--no-compress` 或原生 ZIP 参数。
+- 支持的固定位图尺寸为 n≤6；前沿探针与其已知结果测试只运行到 n=5。新用户建议使用 `main` 的集成实现。
 
-### C 版本
+## 构建与运行
 
-```bash
-cd C
-make          # 编译（-O3 优化）
-make run      # 编译并运行
-make clean    # 清理
-```
+需要 Rust/Cargo；读取工具使用 Python 3.10+ 标准库。命令在 `rust` 目录执行。显式给出小 n，避免旧主程序无参数时默认启动 n=6 BFS。
 
-**依赖**：GCC（MinGW-w64 或 Linux GCC），仅标准库。
-
-### Rust 版本
-
-```bash
+```powershell
+git clone https://github.com/qwe185-wq/polyomino-counter.git
+cd polyomino-counter
+git switch --track origin/codex/transfer-20260926
 cd rust
-cargo build --release             # 编译
-cargo run --release -- 5          # 枚举 n=5
-cargo run --release -- 6 --export # 枚举 + 导出 One-sided 二进制数据
-cargo test --release              # 测试
+cargo build --release --locked
+
+# 本分支新增的 DP 原型：固定计算到 n=5
+cargo run --release --locked --bin transfer_probe
+cargo test --release --locked --bin transfer_probe
+
+# 历史主程序的 BFS 入口；这里必须指定二进制名
+cargo run --release --locked --bin room-count -- 3
+cargo run --release --locked --bin room-count -- 3 --export --export-dir output_n3_new
 ```
 
-**依赖**：Rust 工具链（cargo），依赖库见 `rust/Cargo.toml`。
+导出压缩需要外部 7-Zip。旧版本的错误处理与输出目录行为不同于 main，应使用新的输出目录。该分支适合复现算法演进，日常数据生产优先采用 main。
 
-### 导出工具
+## 已知分类计数
 
-```bash
-# 去重验证（两阶段：hash 分片 + rayon 并行排序）
-cargo run --release --bin dedup_check -- output/all_fixed.zip
-
-# 形状提取与可视化
-python read_shapes.py output/all_fixed.zip --info              # 文件摘要（零解压）
-python read_shapes.py output/all_fixed.zip --txt --limit 10    # 前 10 个形状
-python read_shapes.py output/all_fixed.zip --ascii --from 1000 --to 1005  # 指定范围
-```
-
-## 项目结构
-
-```
-room-count/
-├── C/                    # C 实现
-│   ├── Makefile
-│   ├── docs/HANDOFF.md
-│   └── src/
-│       ├── common.h      # 通用类型与宏
-│       ├── hashset.h/c   # 哈希集合（去重）
-│       ├── enumerate.h/c # 枚举引擎
-│       ├── timer.h       # 计时模块
-│       └── main.c        # 入口 + 输出
-├── rust/                 # Rust 实现
-│   ├── Cargo.toml
-│   ├── docs/HANDOFF-RUST.md
-│   ├── src/
-│   │   ├── main.rs       # 入口 + CLI（--export --jensen --dfs）
-│   │   ├── types.rs      # 核心类型
-│   │   ├── bit_utils.rs  # 位运算 + 洞检测 + 旋转 + 归一化
-│   │   ├── hashset.rs    # 分片并发哈希集
-│   │   ├── fixed.rs      # BFS 枚举 + 对称检测 + One-sided 去重
-│   │   ├── export.rs     # 分块二进制导出 + 7z 压缩
-│   │   ├── symmetric.rs  # 90°/180° 旋转对称
-│   │   ├── burnside.rs   # Burnside 引理
-│   │   ├── redelmeier.rs # Redelmeier DFS (实验)
-│   │   ├── jensen.rs     # Jensen 转移矩阵 (实验)
-│   │   └── bin/
-│   │       └── dedup_check.rs  # 并行去重验证工具
-│   └── output_n6/        # n=6 导出结果（.gitignore 排除）
-├── read_shapes.py        # 形状提取脚本（支持 .zip 流式读取）
-├── docs/
-│   ├── plans/            # 实施计划
-│   └── .lifecycle/       # 编排器状态
-├── README.md
-└── CHANGELOG.md
-```
-
-## 结果
-
-| n | 总房间数 | 无洞（亏格0） | 有洞（亏格≥1） |
-|---|---------|-------------|---------------|
+| n | 总数 | 无洞 | 有洞 |
+|---:|---:|---:|---:|
 | 1 | 1 | 1 | 0 |
 | 2 | 4 | 4 | 0 |
 | 3 | 46 | 44 | 2 |
 | 4 | 2,404 | 1,899 | 505 |
 | 5 | 520,818 | 267,976 | 252,842 |
-| **6** | **410,964,612** | **112,877,832** | **298,086,780** |
+| 6 | 410,964,612 | 112,877,832 | 298,086,780 |
 
-n=6 由 Rust BFS 计算（328s 枚举，~655s 含导出+压缩，~9GB RAM）。
+n=1..5 是 transfer_probe 的自动校验值。n=6 来自历史 Rust BFS 记录，不能据此声称本分支已做同规模 DP 性能验收。旧 BFS 记录为约 328 秒枚举、约 655 秒含导出压缩、约 9 GB 内存；它与后续前沿 DP 的算法时间和资源口径不同。
 
-### 导出数据集
+## 数据读取与编码
 
-`rust/output_n6/` 包含 n=6 全部 410,964,612 个 One-sided polyomino：
+导出记录是 8 字节 u64 little-endian 位图，bit=`row*8+col`，紧包围盒左上对齐，取四个旋转中的最小代表。名称中的 `fixed` 是历史命名，输出代表实际按 one-sided 旋转去重。每个 chunk 最多 10,000,000 条记录。
 
-| 文件 | 大小 | 内容 |
-|------|------|------|
-| `all_fixed.zip` | 1.0 GB | 全部（42 个 chunk，每块 10M masks） |
-| `no_holes/n06_fixed.zip` | 288 MB | 无洞（112,877,832） |
-| `with_holes/n06_fixed.zip` | 742 MB | 有洞（298,086,780） |
+该版本同时写出 `all_fixed` 全集和有洞/无洞分类副本，没有后续 v2 单份分类流或动态 v3 清单。
 
-二进制格式：每个形状 8 字节 u64 LE（规范化位图，stride=8，左上角对齐）。
+```powershell
+# 返回仓库根目录后执行
+python read_shapes.py rust/output_n3_new/all_fixed.zip --info
+python read_shapes.py rust/output_n3_new/all_fixed.zip --ascii --limit 10
+```
 
-## 许可
+并行枚举顺序和不同数据集的索引可能不同，不能将一份 ZIP 的 global_index 直接用于另一份输出。仓库不附带生成的数据集。
 
-MIT
+## 代码和历史记录
+
+| 路径 | 内容 |
+|---|---|
+| [rust/src/transfer.rs](rust/src/transfer.rs) | 新增前沿 DP 原型 |
+| [rust/src/bin/transfer_probe.rs](rust/src/bin/transfer_probe.rs) | 计时探针及 n≤5 校验 |
+| [rust/README.md](rust/README.md) | 本分支 Rust 入口说明 |
+| [C/docs/HANDOFF.md](C/docs/HANDOFF.md) | C 版本历史实现与测量 |
+| [rust/docs/HANDOFF-RUST.md](rust/docs/HANDOFF-RUST.md) | Rust 早期实现记录 |
+| [CHANGELOG.md](CHANGELOG.md) | 早期迭代记录 |
+
+历史说明中的实验实现状态应结合当前分支源码阅读。原项目 README 标注许可为 MIT。

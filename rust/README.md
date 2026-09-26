@@ -1,6 +1,12 @@
-# Rust 计数与导出
+# Polyomino Counter / Rust — 多联骨牌精确计数、洞分类与形状数据集导出
 
-当前默认计数路线是 **前沿连通性 DP + 旋转轨道 + Burnside**；默认导出使用 **前沿状态图回溯**，每个形状仅写入所属分类。n 是必填正整数；n≤6使用既有优化路线，n>6自动切换动态前沿、动态位图与BigUint精确计数，无小尺寸硬上限。n=6完整裸导出和n=7完整纯计数已验证；普通回归不启动完整n≥6枚举。
+**当前分支：`main`。** 推荐使用的集成版本。支持动态网格、任意精度计数、前沿回溯导出、原生 ZIP，以及大尺寸计数的诊断、缓存与小分项并行。
+
+已记录完整 n=13 计数；n=14 在 4 GiB 有界运行中触发内存限制，未得到完整结果。n≥7 的全部形状导出尚未完成验证。
+
+[分支导航](../docs/BRANCHES.md) · [完整项目说明](../README.md)
+
+当前默认计数路线是 **前沿连通性 DP + 旋转轨道 + Burnside**；默认导出使用 **前沿状态图回溯**，每个形状仅写入所属分类。n 是必填正整数；n≤6使用既有优化路线，n>6自动切换动态前沿、动态位图与BigUint精确计数，无小尺寸硬上限。n=6完整裸导出已验证，后续完整纯计数已记录到n=13（验证强度见根目录README）；普通回归不启动完整n≥6枚举。
 
 ```powershell
 cargo build --release --locked
@@ -15,7 +21,7 @@ cargo run --release -- 5 --export --no-compress --export-dir output_n5_raw
 cargo run --release -- 5 --export --export-dir output_n5_zip
 cargo test --release --locked
 
-# 已有本次 n=6 授权；32 MiB硬提交内存上限，默认30秒超时
+# 显式选择 n=6，使用脚本的硬资源上限；32 MiB硬提交内存上限，默认30秒超时
 ./scripts/measure-transfer.ps1 -Exe ./target/release/room-count.exe -N 6 -MemoryMiB 32
 
 # 完整导出：8线程，128 MiB硬上限，默认60秒超时，保留数据与日志

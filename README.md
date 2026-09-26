@@ -1,4 +1,10 @@
-# room-count — 房间形状精确计数与导出
+# Polyomino Counter — 多联骨牌精确计数、洞分类与形状数据集导出
+
+**当前分支：`main`。** 推荐使用的集成版本。支持动态网格、任意精度计数、前沿回溯导出、原生 ZIP，以及大尺寸计数的诊断、缓存与小分项并行。
+
+已记录完整 n=13 计数；n=14 在 4 GiB 有界运行中触发内存限制，未得到完整结果。n≥7 的全部形状导出尚未完成验证。
+
+[分支导航与版本选择](docs/BRANCHES.md) · [GitHub 仓库](https://github.com/qwe185-wq/polyomino-counter) · [本分支技术依据](docs/fixedset-performance-2026-09-26.md)
 
 统计能嵌入 n×n 正方形网格的非空边连通格子集合。平移、旋转合并，镜像保持不同（one-sided polyomino）；分别统计总数、无洞和有洞。这里计的是形状，不区分门的位置或数量。洞按空格的四邻接可达性判断，对角缝隙不算通道。
 
@@ -10,6 +16,60 @@ Rust 主程序提供两条默认路线：
 **现在支持 n=7、8、9…的动态尺寸**。n≤6沿用已优化的固定位图路线；n>6自动采用动态前沿、任意宽位图和任意精度计数，不设置经验性的内存、时间或小尺寸上限。只拒绝零、非法参数及机器地址/尺寸运算溢出。旧 `bfs/canonical/redelmeier` 参考实现仍限n≤6；大尺寸使用 `auto/transfer/frontier`。
 
 `canonical`（one-sided BFS）、`bfs`（Fixed BFS）和新 `redelmeier` 可显式选择，作为交叉验证或低内存参考。旧 `jensen.rs`、`redelmeier.rs` 保留为历史实验源码，不再编入生产入口；新的 Redelmeier 实现在 `redelmeier_export.rs`。旧 `--jensen` 参数调用正确 DP，`--dfs` 已移除。C 目录保留历史实现。
+
+## 项目用途与快速开始
+
+**Polyomino Counter**（原目录名 `room-count`）是面向组合计数、网格房间形状研究和程序化内容数据准备的命令行工具。Rust 负责精确计数与导出，Python 负责读取和 ASCII 展示，C 版本保留早期实现以供比较。仓库名称改变不影响 Cargo 包名和可执行文件名 `room-count`。
+
+这里的 **n 是容纳形状的正方形边长，不是形状包含的格子数量**。例如 n=3 会统计从单格到 3×3 实心方块的所有可容纳连通形状；总数为 46，其中无洞 44、有洞 2。
+
+```powershell
+git clone https://github.com/qwe185-wq/polyomino-counter.git
+cd polyomino-counter/rust
+cargo build --release --locked
+cargo run --release --locked -- 3
+```
+
+需要 Rust/Cargo 工具链；Python 读取器使用 Python 3.10+ 标准库。当前原生 ZIP 无需额外安装 7-Zip，只有显式选择 `--compression-backend 7z` 才依赖它。历史 C 版本使用 GCC、Make 与 OpenMP，构建说明见 [C 实现记录](C/docs/HANDOFF.md)。性能记录主要来自 Windows，跨平台运行时间不保证相同。
+
+## 算法与能力选择
+
+| 入口 | 适用任务 | 尺寸与行为 |
+|---|---|---|
+| `--algorithm auto`（默认） | 常规计数或加 `--export` 导出 | 自动选择 transfer 计数 / frontier 导出 |
+| `--algorithm transfer` | 只需要数量 | 前沿 DP、旋转固定集与 Burnside；不保存全集，不支持导出 |
+| `--algorithm frontier` | 逐形状遍历，可加 `--export` | 前沿图回溯，复用可行性表；支持动态尺寸 |
+| `--algorithm bfs` | Fixed BFS 参考与交叉验证 | n≤6，保存枚举状态 |
+| `--algorithm canonical` | one-sided BFS 参考 | n≤6，按旋转代表去重 |
+| `--algorithm redelmeier` | 生长枚举参考 | n≤6，无全局形状去重表 |
+
+计数按平移规范化后的形状计算旋转不动点，再以 Burnside 引理合并旋转轨道。洞分类与连通性在状态转移中保留，因此可在不写出每个形状的情况下计算分类数量。更细的模块职责和历史优化证据见下文。
+
+## 大尺寸计数与资源控制
+
+```powershell
+# 以下命令在 rust 目录运行；先用小 n 验证环境
+cargo run --release --locked -- 7 --profile-count
+cargo run --release --locked -- 7 --count-cache-dir ./count-cache
+cargo run --release --locked -- 7 --count-threads 4 --count-memory-mib 4096
+```
+
+`--profile-count` 输出分阶段诊断；`--count-cache-dir` 复用已完成的精确分项，不是中途 DP 状态的断点续算。缓存发布依赖支持硬链接的文件系统。`--count-threads` 并行处理较小分项，大型 DP 单独运行。`--count-memory-mib` 是调度预算，**不是操作系统强制内存上限**。这些选项只用于纯计数 `auto/transfer`，不能和导出混用。
+
+`--symmetry-engine auto|frontier|quotient|gray` 用于旋转固定集内核比较。默认使用 `auto`；大轨道强制 Gray 枚举可能非常耗时。动态整数表示避免固定 u64 计数溢出，但计算成本仍随尺寸快速增长。
+
+## 当前验证边界
+
+| 范围 | 已记录的证据 | 限制 |
+|---|---|---|
+| n≤4 | 独立坐标/洪泛 oracle 穷举与集合核对 | 小规模完整交叉验证 |
+| n≤5 | 多种算法、导出集合与读取兼容性对照 | 历次性能环境见原记录 |
+| n=6 | 纯计数及 410,964,612 条完整分类导出验收 | 全集不会随源码仓库提供 |
+| n=7 | 动态 DP 与独立保留的旧参考 DP 一致 | 大尺寸全集导出尚未完成验证 |
+| n=8..13 | 完整计数与优化前后/重复运行的分类核对 | n=13 尚无独立全量计数 oracle |
+| n=14 | 600 秒、4 GiB Job 限制内尝试 | 内存限制终止，未得到完整结果 |
+
+n=13 的一次完整运行用时 122.404 秒、峰值 Job 提交内存约 1.719 GiB；n=14 在约 517.661 秒因内存限制停止。计时口径和分类结果见[分阶段优化与完整计数](docs/fixedset-performance-2026-09-26.md)。这些是已有实验记录，本次文档发布没有重新运行大规模计算。
 
 ## 构建与使用
 
@@ -42,14 +102,14 @@ cargo test --release --locked
 cargo test --locked
 ```
 
-动态路线的n=7完整计数已实跑，并与独立保留的旧DP参考（仅将尺寸常量改为7）一致：总数1,185,652,433,093，无洞144,608,553,854，有洞1,041,043,879,239。n≥8整盘计数、n≥7完整形状导出尚未实跑；动态表示通过小规模全集与大位宽边界测试，详见[动态尺寸实现与验证](docs/dynamic-dimensions-2026-09-26.md)。普通回归不会启动完整n≥6枚举。
+动态路线的n=7完整计数已实跑，并与独立保留的旧DP参考（仅将尺寸常量改为7）一致：总数1,185,652,433,093，无洞144,608,553,854，有洞1,041,043,879,239。后续完整计数已推进到n=13，详见上方验证边界；n≥7完整形状导出尚未完成验证；动态表示通过小规模全集与大位宽边界测试，详见[动态尺寸实现与验证](docs/dynamic-dimensions-2026-09-26.md)。普通回归不会启动完整n≥6枚举。
 
 之前n=6的受限验证继续有效：纯计数通过32 MiB Job上限；完整裸导出在8线程、128 MiB上限下成功，单次整进程5.27秒、峰值Job提交内存96.25 MiB。
 
 Windows 下需要有界运行时，先构建，再执行以下命令；脚本默认 n=5、512 MiB、30秒，n=6必须显式指定：
 
 ```powershell
-# 在 rust 目录内；已有本次 n=6 授权
+# 在 rust 目录内；显式选择 n=6，使用脚本的硬资源上限
 ./scripts/measure-transfer.ps1 -Exe ./target/release/room-count.exe -N 6 -MemoryMiB 32 -Runs 9
 
 # 完整裸导出，保留数据集与计时证据；默认8线程、128 MiB、60秒
@@ -149,3 +209,20 @@ python read_shapes.py rust/output_n5_new/with_holes/n05_fixed.zip --ascii --limi
 - `rust/src/transfer_reference.rs`：冻结的第一批 DP，仅编入测试用于差分校验。
 
 MIT。
+
+
+## 测试与历史工具
+
+```powershell
+# 仓库根目录：读取格式与兼容性回归
+python -m unittest discover -s tests
+# Rust：算法、CLI、导出及失败路径回归
+cargo test --manifest-path rust/Cargo.toml --locked
+cargo test --manifest-path rust/Cargo.toml --release --locked
+```
+
+`extract_landmarks.py` 是首次公开发布时收录的历史配套脚本原稿：从外部 `polyomino-landmarks` 的 Parquet 选择结果和原始 `all_fixed.zip` 提取房间资产。提取模式额外依赖 `pyarrow`、`pandas`，并使用文件顶部的三个本机路径常量。运行前必须自行配置输入与输出位置并核对原数据集索引；它不是通用 v2/v3 迁移器，也不能直接用旧 global_index 访问新的分类数据集。无参数运行会尝试提取并写入配置的资产目录。
+
+## 分支与开发历史
+
+项目保留算法原型、计数性能、内存优化、完整导出和商图研究分支。查看[分支导航](docs/BRANCHES.md)选择对应版本；所有原有 Git 提交保留，README 的更新以追加提交记录。

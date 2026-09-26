@@ -29,6 +29,15 @@ impl Counts {
     fn total(self) -> u64 {
         self.no_hole + self.has_hole
     }
+
+    fn record(&mut self, chi: i8, multiplicity: u64) {
+        assert!(chi <= 1, "连通终态 Euler 特征数不应大于 1");
+        if chi == 1 {
+            self.no_hole += multiplicity;
+        } else {
+            self.has_hole += multiplicity;
+        }
+    }
 }
 
 // 标签规范化保证同一种前沿分区只有一个键。
@@ -104,6 +113,9 @@ fn placement_rows(width: usize, height: usize) -> Vec<Counts> {
     }
     let mut rows = vec![Counts::default(); height + 1];
     let mut states = FxHashMap::default();
+    let mut following = FxHashMap::default();
+    // 已关闭的唯一组件只有全空的未来延续，不再留在活跃前沿中。
+    let mut closed = Counts::default();
     states.insert(
         State {
             labels: [0; MAX_N],
@@ -115,17 +127,22 @@ fn placement_rows(width: usize, height: usize) -> Vec<Counts> {
     );
     for index in 0..width * height {
         let col = index % width;
-        let mut following = FxHashMap::default();
-        for (state, multiplicity) in states {
+        for (state, multiplicity) in states.drain() {
             for occupied in [false, true] {
                 if let Some(next) = transition(state, width, col, occupied) {
-                    *following.entry(next).or_insert(0) += multiplicity;
+                    if next.phase == 2 {
+                        closed.record(next.chi, multiplicity);
+                    } else {
+                        *following.entry(next).or_insert(0) += multiplicity;
+                    }
                 }
             }
         }
-        states = following;
+        std::mem::swap(&mut states, &mut following);
         if col + 1 == width {
-            rows[index / width + 1] = summarize(&states, width);
+            let mut count = closed;
+            count.add(summarize(&states, width));
+            rows[index / width + 1] = count;
         }
     }
     rows
@@ -139,12 +156,7 @@ fn summarize(states: &FxHashMap<State, u64>, width: usize) -> Counts {
             if state.labels[..width].iter().any(|&label| label > 1) {
                 continue;
             }
-            assert!(state.chi <= 1, "连通终态 Euler 特征数不应大于 1");
-            if state.chi == 1 {
-                result.no_hole += multiplicity;
-            } else {
-                result.has_hole += multiplicity;
-            }
+            result.record(state.chi, multiplicity);
         }
     }
     result

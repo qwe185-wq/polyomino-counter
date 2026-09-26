@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Jensen follow-up (2026-09-26)
+- 同宽矩形共享逐行扫描，已关闭形状移入累计器；拓扑状态采用紧凑键和预计算转移图。
+- χ≤0的非空前缀合并为有洞吸收桶，计数循环使用数组和稀疏活跃索引。
+- 新增Windows Job内存/超时受限基准，严格校验n=1..N的三分类结果并拒绝覆盖证据目录。
+- 用户授权后复验n=6：算法中位4.777→2.217ms；最终版通过32MiB硬内存限制。38项Release及38项Debug回归通过。
+- 完整进程耗时未测出明确改善；此次不包含n=6导出加速。逐项证据见 `docs/jensen-optimization-2026-09-26.md`。
+
 ### Performance (2026-09-26)
 - 默认精确计数改为前沿DP、独立旋转轨道及Burnside；n=5内部算法中位0.570ms（旧版205ms）。
 - 导出默认直接枚举one-sided等价类，加入位前沿、位旋转、欧拉洞判定、局部归并统计和有界写缓冲。

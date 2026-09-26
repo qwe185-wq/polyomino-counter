@@ -33,18 +33,29 @@ cargo test --release --locked
 cargo test --locked
 ```
 
-实现的尺寸上限仍为 6；本轮性能改造的测试、基准和导出验证全部限制在 n≤5。**n=6 尚未重新验证，运行前须取得用户单独允许。**测试和 `transfer_probe` 不会自动运行 n=6。
+实现的尺寸上限仍为 6。后续 Jensen 优化已获用户授权，在 Windows Job 硬内存限制下复验 n=6 纯计数，并通过32 MiB上限测试；本轮未重新导出 n=6。普通回归测试和 `transfer_probe` 仍不会自动运行 n=6。
+
+Windows 下需要有界运行时，先构建，再执行以下命令；脚本默认 n=5、512 MiB、30秒，n=6必须显式指定：
+
+```powershell
+# 在 rust 目录内；已有本次 n=6 授权
+./scripts/measure-transfer.ps1 -Exe ./target/release/room-count.exe -N 6 -MemoryMiB 32 -Runs 9
+```
+
+内存限制仅由该脚本的 Job Object 强制执行；直接调用主程序不会自动套用这个上限。
 
 ZIP 压缩需要 7-Zip。Windows 自动检测常用安装位置，否则从 PATH 查找 `7z`；可用环境变量 `ROOM_COUNT_7Z` 指定可执行文件。使用 `--no-compress` 不需要 7-Zip。算法和输出编码不依赖新的外部库。
 
 ## 性能
 
-2026-09-26，Windows x86_64、Rust 1.97.1，Rayon 32 线程，release 默认可移植编译配置。n=5，每种计数预热一次后交替测量9次；导出预热一次后测3次。下表为中位数。
+后续 Jensen 优化：n=6 算法中位数 **4.777 → 2.217 ms（约2.15倍）**；n=5 为 **0.568 → 0.232 ms**。最终版 n=6 Job 峰值提交内存约12.53 MiB，并通过32 MiB硬限制。受限启动器下进程耗时约27 ms，本轮未测出明确的进程端到端加速。详见[逐项优化与有界验证](docs/jensen-optimization-2026-09-26.md)。
+
+下面保留第一批改造的历史对照：2026-09-26，Windows x86_64、Rust 1.97.1，Rayon 32 线程，release 默认可移植编译配置。n=5，每种计数预热一次后交替测量9次；导出预热一次后测3次。下表为中位数。
 
 | 路线 | 算法耗时 | 完整进程耗时 |
 |---|---:|---:|
 | 改造前 Fixed BFS | 205 ms | 227 ms |
-| 新前沿 DP（默认计数） | **0.570 ms** | **11.2 ms** |
+| 第一批前沿 DP | **0.570 ms** | **11.2 ms** |
 | 优化后 Fixed BFS | 68.3 ms | 81.9 ms |
 | 新 one-sided BFS | 29.0 ms | 41.2 ms |
 | 改造前导出 + ZIP9 | 282 ms | 3.275 s |
@@ -65,7 +76,7 @@ ZIP 总体积的一个 n=5 样本：旧 ZIP9 2.60 MB，新 ZIP9 2.47 MB，新 ZI
 | 3 | 46 | 44 | 2 |
 | 4 | 2,404 | 1,899 | 505 |
 | 5 | 520,818 | 267,976 | 252,842 |
-| 6（历史结果，本轮未复验） | 410,964,612 | 112,877,832 | 298,086,780 |
+| 6（纯计数已受限复验） | 410,964,612 | 112,877,832 | 298,086,780 |
 
 新 DP、Fixed BFS、one-sided BFS 在 n≤5 的三类计数一致。测试用独立坐标/洪泛 oracle 穷举 n≤4，验证形状、旋转、洞、导出集合；还校验小矩形 DP 和旋转固定点。实际 n=5 旧版 ZIP9、新版 ZIP9/ZIP1 各有520,818个不重复形状，完整集合相同。
 
@@ -102,5 +113,7 @@ python read_shapes.py rust/output_n5_new/all_fixed.zip --ascii --limit 10
 - `rust/src/export.rs`：惰性分配输出槽、新目录保护、可选 ZIP。
 - `rust/src/validation.rs`、`rust/tests/cli.rs`：独立 oracle、全集合、CLI及失败路径回归。
 - `rust/scripts/benchmark.ps1`：指定旧版 executable 后复现 n≤5 对照基准。
+- `rust/scripts/measure-transfer.ps1`：Windows Job 硬内存与超时限制下的计数验证，显式支持 n=6。
+- `rust/src/transfer_reference.rs`：冻结的第一批 DP，仅编入测试用于差分校验。
 
 MIT。

@@ -1,6 +1,6 @@
 # Rust 计数与导出
 
-当前默认计数路线是 **前沿连通性 DP + 旋转轨道 + Burnside**；默认导出使用 **前沿状态图回溯**，每个形状仅写入所属分类。n 是必填正整数；n≤6使用既有优化路线，n>6自动切换动态前沿、BigUint位图与精确计数，无小尺寸硬上限。n=6完整裸导出和n=7完整纯计数已验证；普通回归不启动完整n≥6枚举。
+当前默认计数路线是 **前沿连通性 DP + 旋转轨道 + Burnside**；默认导出使用 **前沿状态图回溯**，每个形状仅写入所属分类。n 是必填正整数；n≤6使用既有优化路线，n>6自动切换动态前沿、动态位图与BigUint精确计数，无小尺寸硬上限。n=6完整裸导出和n=7完整纯计数已验证；普通回归不启动完整n≥6枚举。
 
 ```powershell
 cargo build --release --locked
@@ -32,4 +32,4 @@ cargo test --release --locked
 
 `read_shapes.py` 可直接读取数据集根目录，按 `dataset.json` 中的 `streams` 顺序拼接逻辑全集；旧v1、ZIP和bin输入仍兼容。
 
-n>6使用v3清单（`uint-le-fixed`、动态`stride/record_bytes`、十进制字符串计数、ZIP64）。已实测n=7总数1,185,652,433,093，与旧参考DP一致；n=8纯计数总数12,575,973,909,316,634，优化前后分类一致。上一批已完成n=12纯计数；本轮从n=13进行600秒/4GiB受控测试，结果及新选项见[分阶段优化记录](../docs/fixedset-performance-2026-09-26.md)。n≥7全集导出仍未完成验证。大轨道集改用保留原格连通标签的DP，小轨道集沿用Gray位运算；超过单字宽度的通用位图内核使用动态`Vec<u64>`，不设小尺寸上限。边界与早期验证详见[动态尺寸记录](../docs/dynamic-dimensions-2026-09-26.md)，历史位运算改进见[大尺寸计数优化](../docs/large-count-optimization-2026-09-26.md)，最新算法、调研取舍与性能见[旋转固定集优化](../docs/symmetric-fixedset-optimization-2026-09-26.md)。旧参考算法 `bfs/canonical/redelmeier` 与历史有界基准脚本仍只处理n≤6；动态入口使用 `auto/transfer/frontier`，不套用资源限制。
+n>6使用v3清单（`uint-le-fixed`、动态`stride/record_bytes`、十进制字符串计数、ZIP64）。已实测n=7总数1,185,652,433,093，与旧参考DP一致；n=8纯计数总数12,575,973,909,316,634，优化前后分类一致。本轮600秒/4GiB受控测试中n=13用122.40秒完成，n=14触发内存限制未完成；结果及新选项见[分阶段优化记录](../docs/fixedset-performance-2026-09-26.md)。n≥7全集导出仍未完成验证。大轨道集改用保留原格连通标签的DP，小轨道集沿用Gray位运算；超过单字宽度的通用位图内核使用动态`Vec<u64>`，不设小尺寸上限。边界与早期验证详见[动态尺寸记录](../docs/dynamic-dimensions-2026-09-26.md)，历史位运算改进见[大尺寸计数优化](../docs/large-count-optimization-2026-09-26.md)，最新算法、调研取舍与性能见[旋转固定集优化](../docs/symmetric-fixedset-optimization-2026-09-26.md)。旧参考算法 `bfs/canonical/redelmeier` 与历史有界基准脚本仍只处理n≤6；动态入口使用 `auto/transfer/frontier`，不套用资源限制。

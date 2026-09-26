@@ -132,62 +132,115 @@ fn transition(state: State, width: usize, col: usize, occupied: bool) -> Option<
     Some(next)
 }
 
+#[derive(Clone, Copy)]
+enum Edge {
+    Invalid,
+    Closed,
+    Next { id: usize, delta: i8 },
+}
+
+struct Node {
+    state: State,
+    col: usize,
+    edges: [Edge; 2],
+    accepts: bool,
+}
+
+impl Node {
+    fn new(state: State, col: usize) -> Self {
+        Self {
+            accepts: state.phase == 1 && state.labels.iter().all(|&label| label <= 1),
+            state,
+            col,
+            edges: [Edge::Invalid; 2],
+        }
+    }
+}
+
+// χ 不影响连通性转移。只为可达拓扑建表，扫描列也属于状态键。
+fn topology_graph(width: usize) -> Vec<Node> {
+    let initial = State { labels: [0; MAX_N], old_left: false, phase: 0, chi: 0 };
+    let mut nodes = vec![Node::new(initial, 0)];
+    let mut ids = FxHashMap::default();
+    ids.insert(0u32, 0usize);
+    let mut cursor = 0;
+    while cursor < nodes.len() {
+        let state = nodes[cursor].state;
+        let col = nodes[cursor].col;
+        for (branch, occupied) in [false, true].into_iter().enumerate() {
+            if let Some(mut next) = transition(state, width, col, occupied) {
+                nodes[cursor].edges[branch] = if next.phase == 2 {
+                    Edge::Closed
+                } else {
+                    let delta = next.chi;
+                    next.chi = 0;
+                    let next_col = (col + 1) % width;
+                    let key = (next.packed() << 3) | next_col as u32;
+                    let id = *ids.entry(key).or_insert_with(|| {
+                        let id = nodes.len();
+                        nodes.push(Node::new(next, next_col));
+                        id
+                    });
+                    Edge::Next { id, delta }
+                };
+            }
+        }
+        cursor += 1;
+    }
+    nodes
+}
+
+const CHI_OFFSET: i32 = (MAX_N * MAX_N) as i32;
+const CHI_BINS: usize = 2 * MAX_N * MAX_N + 1;
+
 // 每一行末读取 C(w,h)，不终止仍可向下一行生长的前沿。
 fn placement_rows(width: usize, height: usize) -> Vec<Counts> {
-    if width == 0 || height == 0 {
-        return vec![Counts::default(); height + 1];
-    }
     let mut rows = vec![Counts::default(); height + 1];
-    let mut states = FxHashMap::default();
-    let mut following = FxHashMap::default();
-    // 已关闭的唯一组件只有全空的未来延续，不再留在活跃前沿中。
+    if width == 0 || height == 0 {
+        return rows;
+    }
+    let nodes = topology_graph(width);
+    let mut counts = vec![0u64; nodes.len() * CHI_BINS];
+    let mut following = vec![0u64; counts.len()];
+    counts[CHI_OFFSET as usize] = 1;
+    let mut active = vec![CHI_OFFSET as usize];
+    let mut next_active = Vec::new();
     let mut closed = Counts::default();
-    states.insert(
-        State {
-            labels: [0; MAX_N],
-            old_left: false,
-            phase: 0,
-            chi: 0,
-        }.packed(),
-        1u64,
-    );
     for index in 0..width * height {
-        let col = index % width;
-        for (key, multiplicity) in states.drain() {
-            let state = State::unpack(key);
-            for occupied in [false, true] {
-                if let Some(next) = transition(state, width, col, occupied) {
-                    if next.phase == 2 {
-                        closed.record(next.chi, multiplicity);
-                    } else {
-                        *following.entry(next.packed()).or_insert(0) += multiplicity;
+        for slot in active.drain(..) {
+            let multiplicity = std::mem::take(&mut counts[slot]);
+            let id = slot / CHI_BINS;
+            let chi = (slot % CHI_BINS) as i32 - CHI_OFFSET;
+            for edge in nodes[id].edges {
+                match edge {
+                    Edge::Invalid => (),
+                    Edge::Closed => closed.record(chi as i8, multiplicity),
+                    Edge::Next { id, delta } => {
+                        let next_chi = chi + delta as i32;
+                        debug_assert!((-CHI_OFFSET..=CHI_OFFSET).contains(&next_chi));
+                        let target = id * CHI_BINS + (next_chi + CHI_OFFSET) as usize;
+                        if following[target] == 0 {
+                            next_active.push(target);
+                        }
+                        following[target] += multiplicity;
                     }
                 }
             }
         }
-        std::mem::swap(&mut states, &mut following);
-        if col + 1 == width {
+        std::mem::swap(&mut counts, &mut following);
+        std::mem::swap(&mut active, &mut next_active);
+        if (index + 1) % width == 0 {
             let mut count = closed;
-            count.add(summarize(&states, width));
+            for &slot in &active {
+                if nodes[slot / CHI_BINS].accepts {
+                    let chi = (slot % CHI_BINS) as i32 - CHI_OFFSET;
+                    count.record(chi as i8, counts[slot]);
+                }
+            }
             rows[index / width + 1] = count;
         }
     }
     rows
-}
-
-fn summarize(states: &FxHashMap<u32, u64>, width: usize) -> Counts {
-    let mut result = Counts::default();
-    for (&key, &multiplicity) in states {
-        let state = State::unpack(key);
-        if state.phase != 0 {
-            // 扫描结束时仍在前沿的不同标签代表不同分量。
-            if state.labels[..width].iter().any(|&label| label > 1) {
-                continue;
-            }
-            result.record(state.chi, multiplicity);
-        }
-    }
-    result
 }
 
 #[cfg(test)]

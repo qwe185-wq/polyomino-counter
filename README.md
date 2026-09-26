@@ -1,4 +1,10 @@
-# room-count — 房间形状精确计数与导出
+# Polyomino Counter — 默认前沿 DP 与并行形状枚举优化
+
+**当前分支：`codex/performance-20260926`。** 将精确前沿 DP 接入默认纯计数入口，引入 one-sided BFS、可选算法、可调 ZIP 压缩和读取器兼容性验证。
+
+尺寸范围为 1..6；本分支这一轮回归、性能和导出对照只验证到 n=5。ZIP 压缩依赖外部 7-Zip，尚无原生流式 ZIP 或动态尺寸。
+
+[分支导航与版本选择](docs/BRANCHES.md) · [GitHub 仓库](https://github.com/qwe185-wq/polyomino-counter) · [本分支技术依据](docs/performance-2026-09-26.md)
 
 统计能嵌入 n×n 正方形网格的非空边连通格子集合。平移、旋转合并，镜像保持不同（one-sided polyomino）；分别统计总数、无洞和有洞。这里计的是形状，不区分门的位置或数量。洞按空格的四邻接可达性判断，对角缝隙不算通道。
 
@@ -8,6 +14,10 @@ Rust 主程序提供两条默认路线：
 - **导出：并行 one-sided BFS**，每个旋转等价类只保留一个最小位图代表。
 
 原 Fixed BFS 可显式选择，作为交叉验证和性能比较。旧 `jensen.rs`、`redelmeier.rs` 保留为历史实验源码，不再编入生产入口；旧 `--jensen` 参数调用新的正确 DP，`--dfs` 已移除。C 目录保留历史实现，不作为当前高性能入口。
+
+## 环境与版本选择
+
+需要 Rust/Cargo 工具链；Python 读取工具使用 Python 3.10+ 标准库。Rust 包和可执行文件名仍为 `room-count`。请先克隆仓库并切换到本文开头标明的分支，再按下方命令运行。完整分支获取命令见[分支导航](docs/BRANCHES.md)。n 是最大包围盒边长，不是形状包含的格子数。
 
 ## 构建与使用
 
@@ -33,7 +43,7 @@ cargo test --release --locked
 cargo test --locked
 ```
 
-实现的尺寸上限仍为 6；本轮性能改造的测试、基准和导出验证全部限制在 n≤5。**n=6 尚未重新验证，运行前须取得用户单独允许。**测试和 `transfer_probe` 不会自动运行 n=6。
+实现的尺寸上限仍为 6；本轮性能改造的测试、基准和导出验证全部限制在 n≤5。**n=6 尚未重新验证，本分支未提供这一轮 n=6 重验结论。**测试和 `transfer_probe` 不会自动运行 n=6。
 
 ZIP 压缩需要 7-Zip。Windows 自动检测常用安装位置，否则从 PATH 查找 `7z`；可用环境变量 `ROOM_COUNT_7Z` 指定可执行文件。使用 `--no-compress` 不需要 7-Zip。算法和输出编码不依赖新的外部库。
 

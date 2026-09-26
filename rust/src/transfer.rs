@@ -160,7 +160,12 @@ impl Node {
 
 // χ 不影响连通性转移。只为可达拓扑建表，扫描列也属于状态键。
 fn topology_graph(width: usize) -> Vec<Node> {
-    let initial = State { labels: [0; MAX_N], old_left: false, phase: 0, chi: 0 };
+    let initial = State {
+        labels: [0; MAX_N],
+        old_left: false,
+        phase: 0,
+        chi: 0,
+    };
     let mut nodes = vec![Node::new(initial, 0)];
     let mut ids = FxHashMap::default();
     ids.insert(0u32, 0usize);
@@ -426,7 +431,10 @@ mod tests {
         assert_eq!(next_chi_bin(1, 1, -2), 0);
         // 宽3高5有多个已封闭洞的历史，全部行快照仍与精确χ参考一致。
         for (height, count) in placement_rows(3, 5).iter().enumerate().skip(1) {
-            assert_eq!((count.no_hole, count.has_hole), reference::placements_for_test(3, height));
+            assert_eq!(
+                (count.no_hole, count.has_hole),
+                reference::placements_for_test(3, height)
+            );
         }
     }
 
@@ -435,7 +443,12 @@ mod tests {
         for chi in i8::MIN..=i8::MAX {
             for phase in 0..=2 {
                 for old_left in [false, true] {
-                    let state = State { labels: [1, 0, 2, 3, 4, 6], old_left, phase, chi };
+                    let state = State {
+                        labels: [1, 0, 2, 3, 4, 6],
+                        old_left,
+                        phase,
+                        chi,
+                    };
                     assert_eq!(State::unpack(state.packed()), state);
                 }
             }
@@ -448,14 +461,20 @@ mod tests {
             let rows = placement_rows(width, 5);
             for height in 1..=5 {
                 let expected = reference::placements_for_test(width, height);
-                assert_eq!((rows[height].no_hole, rows[height].has_hole), expected,
-                    "board={width}x{height}");
+                assert_eq!(
+                    (rows[height].no_hole, rows[height].has_hole),
+                    expected,
+                    "board={width}x{height}"
+                );
             }
         }
         let actual = enumerate_transfer(5, false);
         let expected = reference::enumerate_transfer(5, false);
         for (a, e) in actual.iter().zip(expected.iter()) {
-            assert_eq!((a.total, a.no_hole, a.has_hole), (e.total, e.no_hole, e.has_hole));
+            assert_eq!(
+                (a.total, a.no_hole, a.has_hole),
+                (e.total, e.no_hole, e.has_hole)
+            );
         }
     }
 

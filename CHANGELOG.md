@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Complete export follow-up (2026-09-26)
+- 完整导出改为前沿状态图回溯，按宽共享拓扑图，前缀并行且不保存全局形状集合；保留两种BFS和新Redelmeier作为参考。
+- `format_version: 2` 每形状只存所属分类，以清单定义逻辑全集；不再重复写all副本。读取器兼容新旧格式并按256 KiB分批解码。
+- 默认原生流式ZIP，支持 `--compression-backend native|7z`；256 KiB缓冲、失败保留partial，成功才写数据集清单。
+- canonical BFS减少旋转，按父形状复用旋转结果；独立坐标oracle验证成长公式。
+- n=6完整裸导出单次整进程5.27秒、峰值Job提交内存96.25 MiB，128 MiB硬上限；410,964,612条逐条合法性、分类及全键查重验收通过。
+- 提供有界导出复现脚本与[详细证据](docs/export-optimization-2026-09-26.md)；纯计数约2.2ms不包含形状导出。
+
 ### Jensen follow-up (2026-09-26)
 - 同宽矩形共享逐行扫描，已关闭形状移入累计器；拓扑状态采用紧凑键和预计算转移图。
 - χ≤0的非空前缀合并为有洞吸收桶，计数循环使用数组和稀疏活跃索引。

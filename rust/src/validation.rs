@@ -191,11 +191,12 @@ fn export_preserves_an_existing_dataset() {
 
 #[test]
 fn export_matches_complete_four_by_four_oracle() {
-    check_export(false);
-    check_export(true);
+    for algorithm in ["bfs", "canonical", "frontier", "redelmeier"] {
+        check_export(algorithm);
+    }
 }
 
-fn check_export(canonical: bool) {
+fn check_export(algorithm: &str) {
     let dir = std::env::temp_dir().join(format!(
         "room-count-regression-{}-{}",
         std::process::id(),
@@ -205,17 +206,25 @@ fn check_export(canonical: bool) {
             .as_nanos()
     ));
     let mgr = Arc::new(ExportManager::new(&dir).unwrap());
-    if canonical {
-        crate::fixed::enumerate_canonical(4, false, Some(mgr.clone())).unwrap();
-    } else {
-        enumerate_fixed_with_symmetry(4, false, Some(mgr.clone())).unwrap();
+    match algorithm {
+        "canonical" => {
+            crate::fixed::enumerate_canonical(4, false, Some(mgr.clone())).unwrap();
+        }
+        "bfs" => {
+            enumerate_fixed_with_symmetry(4, false, Some(mgr.clone())).unwrap();
+        }
+        "frontier" => {
+            crate::frontier_export::enumerate_frontier(4, false, Some(mgr.clone())).unwrap();
+        }
+        "redelmeier" => {
+            crate::redelmeier_export::enumerate_redelmeier(4, false, Some(mgr.clone())).unwrap();
+        }
+        _ => unreachable!(),
     }
     mgr.flush_all().unwrap();
     drop(mgr);
     let expected: HashSet<_> = fixed_oracle().into_iter().map(canonical_oracle).collect();
-    let all = read_masks(&dir.join("all_fixed"));
-    assert_eq!(all.len(), 2404);
-    assert_eq!(all.iter().copied().collect::<HashSet<_>>(), expected);
+    assert!(!dir.join("all_fixed").exists());
     let mut classified = HashSet::new();
     for (name, hole) in [("no_holes", false), ("with_holes", true)] {
         for md in 1..=4 {
@@ -229,4 +238,21 @@ fn check_export(canonical: bool) {
     }
     assert_eq!(classified, expected);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn streaming_enumerators_match_known_counts_through_five() {
+    let expected = crate::transfer::enumerate_transfer(5, false);
+    for actual in [
+        crate::frontier_export::enumerate_frontier(5, false, None).unwrap(),
+        crate::redelmeier_export::enumerate_redelmeier(5, false, None).unwrap(),
+    ] {
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(&expected) {
+            assert_eq!(
+                (a.n, a.total, a.no_hole, a.has_hole),
+                (e.n, e.total, e.no_hole, e.has_hole)
+            );
+        }
+    }
 }

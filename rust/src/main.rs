@@ -1,11 +1,13 @@
-//! 精确计数使用前沿 DP；需要完整数据集时使用并行 BFS。
+//! 精确计数使用前沿 DP；完整数据集使用前沿状态图回溯。
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod bit_utils;
 mod burnside;
 mod export;
 mod fixed;
+mod frontier_export;
 mod hashset;
+mod redelmeier_export;
 mod symmetric;
 mod transfer;
 mod types;
@@ -22,6 +24,15 @@ enum Algorithm {
     Transfer,
     Bfs,
     Canonical,
+    Frontier,
+    Redelmeier,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CompressionBackend {
+    Native,
+    #[value(name = "7z")]
+    SevenZip,
 }
 
 fn parse_n(value: &str) -> Result<usize, String> {
@@ -42,7 +53,7 @@ struct Args {
     n: usize,
     #[arg(short, long)]
     verbose: bool,
-    /// auto：纯计数使用前沿DP，导出使用one-sided BFS
+    /// auto：纯计数使用前沿DP，导出使用前沿状态图回溯
     #[arg(long, value_enum, default_value = "auto")]
     algorithm: Algorithm,
     /// 兼容旧参数，使用已经验证的新前沿DP
@@ -60,35 +71,52 @@ struct Args {
     /// ZIP压缩等级0..9，默认1优先吞吐
     #[arg(long,default_value_t=1,value_parser=clap::value_parser!(u8).range(0..=9))]
     compression_level: u8,
+    /// native：流式ZIP；7z：先写裸文件再调用外部7-Zip
+    #[arg(long, value_enum, default_value = "native")]
+    compression_backend: CompressionBackend,
 }
 
 fn run(args: Args) -> io::Result<()> {
     let total_start = Instant::now();
     let algorithm = match args.algorithm {
-        Algorithm::Auto if args.export => Algorithm::Canonical,
+        Algorithm::Auto if args.export => Algorithm::Frontier,
         Algorithm::Auto => Algorithm::Transfer,
         algorithm => algorithm,
     };
     if args.export && algorithm == Algorithm::Transfer {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "前沿DP只计数；导出请使用 --algorithm canonical 或 auto",
+            "前沿DP只计数；导出请使用 --algorithm frontier 或 auto",
         ));
     }
     let title = match algorithm {
         Algorithm::Transfer => "前沿 DP + 对称轨道 + Burnside",
         Algorithm::Canonical => "并行 One-sided BFS + 轨道计数",
+        Algorithm::Frontier => "前沿状态图回溯导出",
+        Algorithm::Redelmeier => "Redelmeier 逐形状遍历",
         _ => "并行 Fixed BFS + Burnside",
     };
     println!("多联骨牌房间计数 — {title}\nn={}", args.n);
     let manager = if args.export {
-        Some(Arc::new(export::ExportManager::new(&args.export_dir)?))
+        Some(Arc::new(
+            if !args.no_compress && args.compression_backend == CompressionBackend::Native {
+                export::ExportManager::new_zip(&args.export_dir, args.compression_level)?
+            } else {
+                export::ExportManager::new(&args.export_dir)?
+            },
+        ))
     } else {
         None
     };
     let compute_start = Instant::now();
     let results = match algorithm {
         Algorithm::Transfer => transfer::enumerate_transfer(args.n, args.verbose),
+        Algorithm::Frontier => {
+            frontier_export::enumerate_frontier(args.n, args.verbose, manager.clone())?
+        }
+        Algorithm::Redelmeier => {
+            redelmeier_export::enumerate_redelmeier(args.n, args.verbose, manager.clone())?
+        }
         Algorithm::Bfs | Algorithm::Canonical => {
             let (fixed, s90, s180) = if algorithm == Algorithm::Canonical {
                 fixed::enumerate_canonical(args.n, args.verbose, manager.clone())?
@@ -118,24 +146,39 @@ fn run(args: Args) -> io::Result<()> {
     if let Some(manager) = manager {
         if !args.no_compress {
             let compress_start = Instant::now();
-            manager.compress_7z(args.compression_level)?;
-            println!("压缩耗时: {:.6}s", compress_start.elapsed().as_secs_f64());
+            match args.compression_backend {
+                CompressionBackend::Native => {
+                    manager.finish_zip()?;
+                    println!(
+                        "ZIP收尾耗时: {:.6}s（流式压缩已计入算法耗时）",
+                        compress_start.elapsed().as_secs_f64()
+                    );
+                }
+                CompressionBackend::SevenZip => {
+                    manager.compress_7z(args.compression_level)?;
+                    println!("压缩耗时: {:.6}s", compress_start.elapsed().as_secs_f64());
+                }
+            }
         }
         let count = results.last().unwrap().total;
+        let streams = manager.stream_manifest(!args.no_compress, count)?;
         let dataset_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(io::Error::other)?
             .as_nanos();
         let manifest = format!(
-            concat!("{{\n  \"format_version\": 1,\n  \"dataset_id\": \"{}-{}\",\n",
+            concat!("{{\n  \"format_version\": 2,\n  \"dataset_id\": \"{}-{}\",\n",
             "  \"max_n\": {},\n  \"count\": {},\n  \"equivalence\": \"one-sided\",\n",
             "  \"encoding\": \"u64-le-stride8\",\n  \"representative\": \"minimum-rotation\",\n",
             "  \"category_dimension\": \"exact-max-bounding-box\",\n",
-            "  \"ordering\": \"parallel-unspecified\",\n  \"complete\": true\n}}\n"),
+            "  \"storage_layout\": \"classified-single-copy\",\n",
+            "  \"ordering\": \"category-major-parallel-unspecified\",\n",
+            "  \"streams\": [\n{}\n  ],\n  \"complete\": true\n}}\n"),
             dataset_id,
             std::process::id(),
             args.n,
-            count
+            count,
+            streams
         );
         std::fs::write(args.export_dir.join("dataset.json"), manifest)?;
         println!(

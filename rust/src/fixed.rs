@@ -115,6 +115,8 @@ fn enumerate(
                     let mut output = Vec::new();
                     for &pmask in parents {
                         let (pw, ph) = mask_extent(pmask);
+                        let parent_rotations =
+                            one_sided.then(|| ParentRotations::new(pmask, pw, ph));
                         let padded = pmask << 9;
                         let mut frontier =
                             ((padded << 8) | (padded >> 8) | (padded << 1) | (padded >> 1))
@@ -125,11 +127,10 @@ fn enumerate(
                             frontier &= frontier - 1;
                             let r = (bit / 8) as i32 - 1;
                             let c = (bit % 8) as i32 - 1;
-                            let (m, w, h) = grow_mask(pmask, pw, ph, r, c);
-                            let (m, w, h) = if one_sided {
-                                compute_canonical(m, w, h)
+                            let (m, w, h) = if let Some(rotations) = parent_rotations {
+                                rotations.grow_canonical(pw, ph, r, c)
                             } else {
-                                (m, w, h)
+                                grow_mask(pmask, pw, ph, r, c)
                             };
                             if !dedup.check_and_insert(m) {
                                 continue;

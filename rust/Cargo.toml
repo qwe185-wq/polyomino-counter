@@ -25,6 +25,10 @@ smallvec = "1.14"
 # 高性能内存分配器 — 减少碎片，优化并发
 mimalloc = "0.1"
 
+# 进程内流式 ZIP；仅启用 Deflate，使用纯 Rust 后端。
+zip = { version = "=2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }
+flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
+
 [profile.release]
 opt-level = 3
 lto = "fat"

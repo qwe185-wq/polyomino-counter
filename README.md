@@ -5,9 +5,9 @@
 Rust 主程序提供两条默认路线：
 
 - **只计数：前沿连通性 DP + 旋转轨道枚举 + Burnside**，不保存每个形状。
-- **导出：并行 one-sided BFS**，每个旋转等价类只保留一个最小位图代表。
+- **导出：前沿状态图回溯（frontier）**，共享后缀可行性表，逐条生成最小旋转代表，不保存全局形状集合。
 
-原 Fixed BFS 可显式选择，作为交叉验证和性能比较。旧 `jensen.rs`、`redelmeier.rs` 保留为历史实验源码，不再编入生产入口；旧 `--jensen` 参数调用新的正确 DP，`--dfs` 已移除。C 目录保留历史实现，不作为当前高性能入口。
+`canonical`（one-sided BFS）、`bfs`（Fixed BFS）和新 `redelmeier` 可显式选择，作为交叉验证或低内存参考。旧 `jensen.rs`、`redelmeier.rs` 保留为历史实验源码，不再编入生产入口；新的 Redelmeier 实现在 `redelmeier_export.rs`。旧 `--jensen` 参数调用正确 DP，`--dfs` 已移除。C 目录保留历史实现。
 
 ## 构建与使用
 
@@ -29,24 +29,32 @@ cargo run --release -- 5 --export --no-compress --export-dir output_n5_raw
 # 更高压缩率，耗时也更长
 cargo run --release -- 5 --export --compression-level 9 --export-dir output_n5_zip9
 
+# 可选外部7-Zip：同等级与native的耗时、压缩率不同
+cargo run --release -- 5 --export --compression-backend 7z --compression-level 9 --export-dir output_n5_7z
+
 cargo test --release --locked
 cargo test --locked
 ```
 
-实现的尺寸上限仍为 6。后续 Jensen 优化已获用户授权，在 Windows Job 硬内存限制下复验 n=6 纯计数，并通过32 MiB上限测试；本轮未重新导出 n=6。普通回归测试和 `transfer_probe` 仍不会自动运行 n=6。
+实现的尺寸上限仍为 6。n=6 纯计数已通过32 MiB Job上限；完整裸导出在8线程、128 MiB上限下成功，单次整进程5.27秒、峰值Job提交内存96.25 MiB。普通回归测试和 `transfer_probe` 不会自动运行 n=6。
 
 Windows 下需要有界运行时，先构建，再执行以下命令；脚本默认 n=5、512 MiB、30秒，n=6必须显式指定：
 
 ```powershell
 # 在 rust 目录内；已有本次 n=6 授权
 ./scripts/measure-transfer.ps1 -Exe ./target/release/room-count.exe -N 6 -MemoryMiB 32 -Runs 9
+
+# 完整裸导出，保留数据集与计时证据；默认8线程、128 MiB、60秒
+./scripts/measure-export.ps1 -Exe ./target/release/room-count.exe -N 6 -Mode raw
 ```
 
 内存限制仅由该脚本的 Job Object 强制执行；直接调用主程序不会自动套用这个上限。
 
-ZIP 压缩需要 7-Zip。Windows 自动检测常用安装位置，否则从 PATH 查找 `7z`；可用环境变量 `ROOM_COUNT_7Z` 指定可执行文件。使用 `--no-compress` 不需要 7-Zip。算法和输出编码不依赖新的外部库。
+默认 `--compression-backend native` 使用Rust `zip`/`flate2` 流式压缩，无需外部程序。选择 `7z` 时，Windows 自动检测常用安装位置，否则从 PATH 查找 `7z`；可用 `ROOM_COUNT_7Z` 指定可执行文件。等级0为不压缩ZIP，默认等级1优先速度。
 
 ## 性能
+
+完整导出优化：n=5、8线程，原版双份裸导出整进程中位92.72 ms，新前沿回溯单份导出42.19 ms；后续同批ZIP1对照，原生流式ZIP整进程59.44 ms，外部7z为282.13 ms。新格式裸数据减半。上述比较分别包含算法、存储布局或压缩后端变化，不能作为单一算法的加速倍数。详见[完整导出优化与验收](docs/export-optimization-2026-09-26.md)。
 
 后续 Jensen 优化：n=6 算法中位数 **4.777 → 2.217 ms（约2.15倍）**；n=5 为 **0.568 → 0.232 ms**。最终版 n=6 Job 峰值提交内存约12.53 MiB，并通过32 MiB硬限制。受限启动器下进程耗时约27 ms，本轮未测出明确的进程端到端加速。详见[逐项优化与有界验证](docs/jensen-optimization-2026-09-26.md)。
 
@@ -76,9 +84,11 @@ ZIP 总体积的一个 n=5 样本：旧 ZIP9 2.60 MB，新 ZIP9 2.47 MB，新 ZI
 | 3 | 46 | 44 | 2 |
 | 4 | 2,404 | 1,899 | 505 |
 | 5 | 520,818 | 267,976 | 252,842 |
-| 6（纯计数已受限复验） | 410,964,612 | 112,877,832 | 298,086,780 |
+| 6（纯计数及完整裸导出已受限验收） | 410,964,612 | 112,877,832 | 298,086,780 |
 
 新 DP、Fixed BFS、one-sided BFS 在 n≤5 的三类计数一致。测试用独立坐标/洪泛 oracle 穷举 n≤4，验证形状、旋转、洞、导出集合；还校验小矩形 DP 和旋转固定点。实际 n=5 旧版 ZIP9、新版 ZIP9/ZIP1 各有520,818个不重复形状，完整集合相同。
+
+本次frontier和新Redelmeier也通过n≤5计数与完整集合对照；n=6裸数据及原生ZIP解码结果的410,964,612条记录通过独立逐条合法性、分类和全键查重验收。原生ZIP1单次整进程16.02秒、126.41 MiB峰值Job提交内存、1.11 GB压缩文件；该内存值接近本次128 MiB限制，不能当作跨机器上界。
 
 ## 数据格式与兼容性
 
@@ -87,21 +97,25 @@ ZIP 总体积的一个 n=5 样本：旧 ZIP9 2.60 MB，新 ZIP9 2.47 MB，新 ZI
 ```text
 output_n5_new/
 ├── dataset.json
-├── all_fixed.zip
 ├── no_holes/n01_fixed.zip … n05_fixed.zip
 └── with_holes/n03_fixed.zip … n05_fixed.zip
 ```
 
 `fixed` 是兼容历史工具的文件名，文件内容实际为 **one-sided**。分类文件的 nXX 表示最大包围盒边长**恰好为XX**，程序的 n 行表示边长**不超过n**的累计值。空分类不生成文件。裸导出使用同名目录和 `shapes_000001.bin`。
 
-导出拒绝非空目录，避免覆盖现有数据。每个成功完成的数据集有独立 `dataset_id`；顺序标记为 `parallel-unspecified`。**形状集合保持兼容，但旧 ZIP 的 global_index 不能直接用于新 ZIP。**外部 Parquet、landmarks 和游戏资产必须绑定原数据集，或对新数据重新建立索引。写盘、压缩失败返回非零状态；失败任务不会生成 `complete: true` 清单，原始数据保留用于排查。
+新 `format_version: 2` 每个形状只存入所属分类，不再写 `all_fixed` 副本。清单的 `streams` 记录分类、精确包围盒边长和条数；按清单顺序串接即逻辑全集，`ordering` 为 `category-major-parallel-unspecified`。n=6原始有效载荷3,287,716,896字节（约3.062 GiB）。
+
+导出拒绝非空目录，避免覆盖现有数据。每个成功数据集有独立 `dataset_id`。**形状集合保持兼容，但旧 ZIP 的 global_index 不能直接用于新 ZIP，也不能跨独立运行复用。**外部 Parquet、landmarks 和游戏资产必须绑定原数据集，或重新建立索引。写盘、压缩失败返回非零；失败任务不会生成成功清单，裸文件或 `.zip.partial` 保留用于排查。原生ZIP完成全部归档后才发布正式文件。
 
 现有读取工具仍可使用：
 
 ```powershell
-python read_shapes.py rust/output_n5_new/all_fixed.zip --info
-python read_shapes.py rust/output_n5_new/all_fixed.zip --ascii --limit 10
+python read_shapes.py rust/output_n5_new --info
+python read_shapes.py rust/output_n5_new --ascii --limit 10
+python read_shapes.py rust/output_n5_new/with_holes/n05_fixed.zip --ascii --limit 10
 ```
+
+读取器兼容旧v1根目录、独立ZIP/bin和chunk目录；按256 KiB块解码，跨分类读取时惰性打开ZIP。`--info`读取清单与文件元数据，不代表逐条验证通过。
 
 `dedup_check` 是历史辅助工具，只能检查部分性质；完整正确性以回归测试、分类计数和集合对照为准。
 
@@ -109,11 +123,15 @@ python read_shapes.py rust/output_n5_new/all_fixed.zip --ascii --limit 10
 
 - `rust/src/transfer.rs`：前沿分量状态、增量欧拉特征、差分去平移、旋转轨道。
 - `rust/src/fixed.rs`：两种 BFS、位前沿、分块任务、局部统计和流式导出。
+- `rust/src/frontier_export.rs`：共享拓扑图与后缀表、互斥前缀并行回溯。
+- `rust/src/redelmeier_export.rs`：无全局去重表的串行半平面生长枚举。
 - `rust/src/bit_utils.rs`：位矩阵旋转、平移归一化、欧拉洞检测。
 - `rust/src/export.rs`：惰性分配输出槽、新目录保护、可选 ZIP。
 - `rust/src/validation.rs`、`rust/tests/cli.rs`：独立 oracle、全集合、CLI及失败路径回归。
 - `rust/scripts/benchmark.ps1`：指定旧版 executable 后复现 n≤5 对照基准。
 - `rust/scripts/measure-transfer.ps1`：Windows Job 硬内存与超时限制下的计数验证，显式支持 n=6。
+- `rust/scripts/measure-export.ps1`：有界完整导出，记录算法、ZIP收尾/压缩、整进程、峰值内存和数据量。
+- `rust/scripts/verify-export.rs`：标准库独立裸输出验收器，磁盘分桶全键查重和逐形状语义检查。
 - `rust/src/transfer_reference.rs`：冻结的第一批 DP，仅编入测试用于差分校验。
 
 MIT。

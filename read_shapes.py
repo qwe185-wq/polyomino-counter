@@ -8,7 +8,7 @@
 读取时只解压目标 chunk，不解压整个文件。
 
 用法:
-  python read_shapes.py <文件.(bin|zip)> [选项]
+  python read_shapes.py <数据集目录|文件.(bin|zip)|chunk目录> [选项]
 
 选项:
   --ascii      输出 ASCII 图形
@@ -31,11 +31,13 @@ import os
 import re
 import struct
 import zipfile
+import json
 
 STRIDE = 8
 STRIDE_SHIFT = 3
 MASK_SIZE = 8
 CHUNK_SIZE = 10_000_000  # 与 Rust export.rs 一致
+READ_BATCH_SIZE = 256 * 1024
 
 
 # ================================================================
@@ -87,6 +89,30 @@ def shape_to_text(mask):
 # ================================================================
 
 CHUNK_RE = re.compile(r"shapes_(\d{6})\.bin$")
+STREAM_RE = re.compile(r"(no_holes|with_holes)/n(\d{2})_fixed(\.zip)?$")
+
+
+def _checked_count(size, name, chunk=True):
+    if size % MASK_SIZE:
+        raise ValueError(f"Mask data length is not divisible by 8: {name}")
+    count = size // MASK_SIZE
+    if chunk and count > CHUNK_SIZE:
+        raise ValueError(f"Chunk exceeds {CHUNK_SIZE} masks: {name}")
+    return count
+
+
+def _read_masks(file, count, name):
+    """以固定大小批量解码，短读必须报错。"""
+    batch_count = READ_BATCH_SIZE // MASK_SIZE
+    while count:
+        take = min(count, batch_count)
+        expected = take * MASK_SIZE
+        data = file.read(expected)
+        if len(data) != expected:
+            raise ValueError(f"Short mask read: {name}")
+        for (mask,) in struct.iter_unpack("<Q", data):
+            yield mask
+        count -= take
 
 
 class ChunkIndex:
@@ -95,8 +121,8 @@ class ChunkIndex:
     def __init__(self, zip_path: str):
         self.chunks = []  # [(start_global_idx, entry_name, file_size)]
         self.total = 0
+        self.path = zip_path
         self._build(zip_path)
-        self._zf = zipfile.ZipFile(zip_path, "r")
 
     def _build(self, zip_path: str):
         with zipfile.ZipFile(zip_path, "r") as zf:
@@ -119,8 +145,12 @@ class ChunkIndex:
                 raise FileNotFoundError(f"No .bin found in {zip_path}")
 
             entries.sort(key=lambda x: x[0])
+            seen = set()
             for _, name, size in entries:
-                count = size // MASK_SIZE
+                if name in seen:
+                    raise ValueError(f"Duplicate ZIP entry: {name}")
+                seen.add(name)
+                count = _checked_count(size, name, CHUNK_RE.search(name) is not None)
                 self.chunks.append((self.total, name, count))
                 self.total += count
 
@@ -137,16 +167,15 @@ class ChunkIndex:
             skip = max(0, start - global_start)
             read_count = min(count - skip, end - max(start, global_start) + 1)
             byte_offset = skip * MASK_SIZE
-            byte_len = read_count * MASK_SIZE
-
-            with self._zf.open(name, "r") as f:
-                f.seek(byte_offset)
-                data = f.read(byte_len)
-            for i in range(0, len(data), MASK_SIZE):
-                yield struct.unpack("<Q", data[i:i + MASK_SIZE])[0]
+            # 按需打开 ZIP；清单扫描及 --info 不保留文件句柄。
+            with zipfile.ZipFile(self.path, "r") as zf:
+                with zf.open(name, "r") as f:
+                    f.seek(byte_offset)
+                    yield from _read_masks(f, read_count, name)
 
     def close(self):
-        self._zf.close()
+        # iter_range 中的 with 块在迭代结束或关闭时释放句柄。
+        pass
 
 
 # ================================================================
@@ -166,14 +195,14 @@ class BinIndex:
                 if m:
                     fpath = os.path.join(path, name)
                     size = os.path.getsize(fpath)
-                    count = size // MASK_SIZE
+                    count = _checked_count(size, fpath)
                     self.chunks.append((self.total, fpath, count))
                     self.total += count
             if not self.chunks:
                 raise FileNotFoundError(f"No shapes_*.bin in {path}")
         else:
             size = os.path.getsize(path)
-            count = size // MASK_SIZE
+            count = _checked_count(size, path, False)
             self.chunks = [(0, path, count)]
             self.total = count
 
@@ -191,15 +220,122 @@ class BinIndex:
 
             with open(fpath, "rb") as f:
                 f.seek(byte_offset)
-                for _ in range(read_count):
-                    data = f.read(MASK_SIZE)
-                    if len(data) < MASK_SIZE:
-                        break
-                    yield struct.unpack("<Q", data)[0]
+                yield from _read_masks(f, read_count, fpath)
+
+
+class DatasetIndex:
+    """按清单顺序将各分类流拼成一个逻辑全集。"""
+
+    def __init__(self, root):
+        self.root = os.path.realpath(root)
+        with open(os.path.join(root, "dataset.json"), "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        if manifest.get("complete") is not True:
+            raise ValueError("Dataset is incomplete")
+        if manifest.get("encoding") != "u64-le-stride8":
+            raise ValueError("Unsupported mask encoding")
+        if not isinstance(manifest.get("dataset_id"), str) or not manifest["dataset_id"]:
+            raise ValueError("Missing dataset_id")
+        if type(manifest.get("count")) is not int or manifest["count"] < 0:
+            raise ValueError("Invalid dataset count")
+
+        self.sources = []  # [(global_start, index)]
+        self.chunks = []
+        self.total = 0
+        version = manifest.get("format_version")
+        try:
+            if version == 1:
+                self._build_legacy(root)
+            elif version == 2:
+                self._build_classified(root, manifest)
+            else:
+                raise ValueError(f"Unsupported dataset format version: {version}")
+            if self.total != manifest["count"]:
+                raise ValueError(f"Dataset count mismatch: {self.total} != {manifest['count']}")
+        except Exception:
+            self.close()
+            raise
+
+    def _add(self, index):
+        start = self.total
+        self.sources.append((start, index))
+        self.chunks.extend((start + local_start, name, count)
+                           for local_start, name, count in index.chunks)
+        self.total += index.total
+
+    def _build_legacy(self, root):
+        directory = os.path.join(root, "all_fixed")
+        archive = directory + ".zip"
+        if os.path.isdir(directory):
+            self._add(BinIndex(directory))
+        elif os.path.isfile(archive):
+            self._add(ChunkIndex(archive))
+        else:
+            raise FileNotFoundError(f"No all_fixed stream in {root}")
+
+    def _build_classified(self, root, manifest):
+        if manifest.get("storage_layout") != "classified-single-copy":
+            raise ValueError("Unsupported storage layout")
+        if manifest.get("representative") != "minimum-rotation":
+            raise ValueError("Unsupported representative")
+        if manifest.get("ordering") != "category-major-parallel-unspecified":
+            raise ValueError("Unsupported stream ordering")
+        streams = manifest.get("streams")
+        if not isinstance(streams, list):
+            raise ValueError("Invalid streams")
+        seen = set()
+        last_order = (-1, 0)
+        for stream in streams:
+            if not isinstance(stream, dict):
+                raise ValueError("Invalid stream entry")
+            name = stream.get("path")
+            match = STREAM_RE.fullmatch(name) if isinstance(name, str) else None
+            if not match:
+                raise ValueError(f"Invalid stream path: {name}")
+            category, md_text, suffix = match.groups()
+            md = int(md_text)
+            order = (category == "with_holes", md)
+            if not 1 <= md <= STRIDE or order <= last_order or order in seen:
+                raise ValueError(f"Duplicate or out-of-order stream: {name}")
+            seen.add(order)
+            last_order = order
+            if type(stream.get("max_dimension")) is not int or stream["max_dimension"] != md:
+                raise ValueError(f"Invalid max_dimension for {name}")
+            if type(stream.get("has_hole")) is not bool or stream["has_hole"] != order[0]:
+                raise ValueError(f"Invalid has_hole for {name}")
+            if type(stream.get("count")) is not int or stream["count"] <= 0:
+                raise ValueError(f"Invalid stream count for {name}")
+            path = os.path.realpath(os.path.join(root, *name.split("/")))
+            if os.path.commonpath((self.root, path)) != self.root:
+                raise ValueError(f"Stream path escapes dataset: {name}")
+            if not (os.path.isfile(path) if suffix else os.path.isdir(path)):
+                raise ValueError(f"Stream path has wrong type or is missing: {name}")
+            index = ChunkIndex(path) if suffix else BinIndex(path)
+            if index.total != stream["count"]:
+                raise ValueError(f"Stream count mismatch: {name}")
+            self._add(index)
+
+    def iter_range(self, start, end):
+        for global_start, index in self.sources:
+            global_end = global_start + index.total - 1
+            if global_end < start:
+                continue
+            if global_start > end:
+                break
+            local_start = max(0, start - global_start)
+            local_end = min(index.total - 1, end - global_start)
+            yield from index.iter_range(local_start, local_end)
+
+    def close(self):
+        for _, index in self.sources:
+            if hasattr(index, "close"):
+                index.close()
 
 
 def open_index(path: str):
     """自动判断格式，返回带 iter_range 的索引对象。"""
+    if os.path.isdir(path) and os.path.isfile(os.path.join(path, "dataset.json")):
+        return DatasetIndex(path)
     if path.endswith(".zip"):
         return ChunkIndex(path)
     else:
@@ -273,64 +409,52 @@ def main():
             start_idx = 0; end_idx = int(sys.argv[i + 1]) - 1; i += 1
         i += 1
 
-    # 打开索引
     idx = open_index(path)
+    try:
+        if info_only:
+            size = idx.total * MASK_SIZE
+            print(f"File: {os.path.basename(path)}")
+            print(f"Size: {size:,} bytes ({size / 1e6:.2f} MB)")
+            print(f"Shapes: {idx.total:,}")
+            if len(idx.chunks) > 1:
+                print(f"Chunks: {len(idx.chunks)}")
+            return
 
-    if info_only:
-        size = idx.total * MASK_SIZE
-        print(f"File: {os.path.basename(path)}")
-        print(f"Size: {size:,} bytes ({size / 1e6:.2f} MB)")
-        print(f"Shapes: {idx.total:,}")
-        if hasattr(idx, 'chunks') and len(idx.chunks) > 1:
-            print(f"Chunks: {len(idx.chunks)}")
-        return
+        if start_idx is None:
+            start_idx = 0
+        if end_idx is None:
+            end_idx = idx.total - 1
 
-    if start_idx is None:
-        start_idx = 0
-    if end_idx is None:
-        end_idx = idx.total - 1
+        loaded_chunks = sum(1 for global_start, _, count in idx.chunks
+                            if global_start + count - 1 >= start_idx and global_start <= end_idx)
 
-    # 请求的 mask 跨越的 chunk 数
-    requested = end_idx - start_idx + 1
-    loaded_chunks = 0
-    for gs, _, _ in idx.chunks:
-        ge = gs + _ - 1
-        if ge >= start_idx and gs <= end_idx:
-            loaded_chunks += 1
-
-    print(f"# File: {os.path.basename(path)}")
-    if hole_filter is not None:
-        print(f"# Filter: {'has_hole' if hole_filter else 'no_hole'}")
-    print(f"# Total: {idx.total:,}  Range: [{start_idx + 1}, {end_idx + 1}]")
-    print(f"# Chunks to decompress: {loaded_chunks}")
-    print()
-
-    # 流式读取指定范围
-    displayed = 0
-    for global_i, mask in enumerate(idx.iter_range(start_idx, end_idx)):
-        idx_num = start_idx + global_i + 1
-
+        print(f"# File: {os.path.basename(path)}")
         if hole_filter is not None:
-            if detect_hole(mask) != hole_filter:
+            print(f"# Filter: {'has_hole' if hole_filter else 'no_hole'}")
+        print(f"# Total: {idx.total:,}  Range: [{start_idx + 1}, {end_idx + 1}]")
+        print(f"# Chunks to decompress: {loaded_chunks}")
+        print()
+
+        displayed = 0
+        for global_i, mask in enumerate(idx.iter_range(start_idx, end_idx)):
+            idx_num = start_idx + global_i + 1
+            if hole_filter is not None and detect_hole(mask) != hole_filter:
                 continue
+            w, h = mask_extent(mask)
+            size = mask_popcount(mask)
+            if mode == "ascii":
+                print(f"--- Shape {idx_num} (size={size}, {w}x{h}) ---")
+                print(shape_to_ascii(mask))
+                print()
+            else:
+                print(shape_to_text(mask))
+            displayed += 1
 
-        w, h = mask_extent(mask)
-        size = mask_popcount(mask)
-
-        if mode == "ascii":
-            print(f"--- Shape {idx_num} (size={size}, {w}x{h}) ---")
-            print(shape_to_ascii(mask))
-            print()
-        else:
-            print(shape_to_text(mask))
-
-        displayed += 1
-
-    if displayed == 0:
-        print("(no matching shapes)")
-
-    if hasattr(idx, 'close'):
-        idx.close()
+        if displayed == 0:
+            print("(no matching shapes)")
+    finally:
+        if hasattr(idx, "close"):
+            idx.close()
 
 
 if __name__ == "__main__":

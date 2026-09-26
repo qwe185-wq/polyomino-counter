@@ -85,6 +85,7 @@ pub fn verify_results(results: &[RoomCount]) -> bool {
         (3, 46, 44, 2),
         (4, 2404, 1899, 505),
         (5, 520818, 267976, 252842),
+        (6, 410964612, 112877832, 298086780),
     ];
 
     for &(n, total, no_hole, has_hole) in known {
@@ -108,6 +109,31 @@ pub fn verify_results(results: &[RoomCount]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn known_count_guard_covers_six_without_enumerating() {
+        let known = [
+            (1, 1, 0),
+            (4, 4, 0),
+            (46, 44, 2),
+            (2404, 1899, 505),
+            (520818, 267976, 252842),
+            (410964612, 112877832, 298086780),
+        ];
+        let mut counts: Vec<_> = known
+            .into_iter()
+            .enumerate()
+            .map(|(i, (total, no_hole, has_hole))| RoomCount {
+                n: i + 1,
+                total,
+                no_hole,
+                has_hole,
+            })
+            .collect();
+        assert!(verify_results(&counts));
+        counts[5].has_hole -= 1;
+        assert!(!verify_results(&counts));
+    }
 
     #[test]
     fn test_burnside_formula_integer() {

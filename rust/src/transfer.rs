@@ -55,7 +55,8 @@ fn transition(state: State, width: usize, col: usize, occupied: bool) -> Option<
     let up = state.labels[col] != 0;
     let up_left = col > 0 && state.old_left;
     let up_right = col + 1 < width && state.labels[col + 1] != 0;
-    next.old_left = up;
+    // 行末的旧左上邻居不会被下一行首格读取，归零以合并等价状态。
+    next.old_left = col + 1 < width && up;
 
     if occupied {
         let left_label = if left { state.labels[col - 1] } else { 0 };
@@ -141,36 +142,18 @@ fn connected_placements(width: usize, height: usize) -> Counts {
     result
 }
 
-fn connected(mask: u64, width: usize, height: usize) -> bool {
+fn connected(mask: u64, _width: usize, _height: usize) -> bool {
     if mask == 0 {
         return false;
     }
-    let mut seen = 0u64;
-    let mut pending = mask & mask.wrapping_neg();
-    while pending != 0 {
-        let bit = pending & pending.wrapping_neg();
-        pending ^= bit;
-        if seen & bit != 0 {
-            continue;
-        }
-        seen |= bit;
-        let position = bit.trailing_zeros() as usize;
-        let row = position / 8;
-        let col = position % 8;
-        let mut adjacent = 0;
-        if row > 0 {
-            adjacent |= bit >> 8;
-        }
-        if row + 1 < height {
-            adjacent |= bit << 8;
-        }
-        if col > 0 {
-            adjacent |= bit >> 1;
-        }
-        if col + 1 < width {
-            adjacent |= bit << 1;
-        }
-        pending |= adjacent & mask & !seen;
+    let mut seen = mask & mask.wrapping_neg();
+    let mut frontier = seen;
+    while frontier != 0 {
+        // 行步长 8、宽度至多 6，水平移位不会进入相邻行的有效列。
+        let adjacent =
+            ((frontier << 1) | (frontier >> 1) | (frontier << 8) | (frontier >> 8)) & mask;
+        frontier = adjacent & !seen;
+        seen |= frontier;
     }
     seen == mask
 }
@@ -182,18 +165,21 @@ fn has_hole(mask: u64) -> bool {
     edges + 1 > vertices + faces
 }
 
-fn full_bounding_box(mask: u64, width: usize, height: usize) -> bool {
-    let bottom = mask >> ((height - 1) * 8);
+fn boundary_masks(width: usize, height: usize) -> [u64; 4] {
+    let top = (1u64 << width) - 1;
+    let bottom = top << ((height - 1) * 8);
     let mut left = 0u64;
     let mut right = 0u64;
     for row in 0..height {
         left |= 1u64 << (row * 8);
         right |= 1u64 << (row * 8 + width - 1);
     }
-    mask & ((1u64 << width) - 1) != 0
-        && bottom & ((1u64 << width) - 1) != 0
-        && mask & left != 0
-        && mask & right != 0
+    [top, bottom, left, right]
+}
+
+#[cfg(test)]
+fn full_bounding_box(mask: u64, boundaries: [u64; 4]) -> bool {
+    boundaries.iter().all(|&side| mask & side != 0)
 }
 
 fn rotation_orbits(width: usize, height: usize, quarter_turn: bool) -> Vec<u64> {
@@ -232,15 +218,16 @@ fn symmetric_bbox(width: usize, height: usize, quarter_turn: bool) -> Counts {
         return Counts::default();
     }
     let orbits = rotation_orbits(width, height, quarter_turn);
+    let boundaries = boundary_masks(width, height);
     let mut counts = Counts::default();
+    let mut mask = 0u64;
     for choice in 1usize..(1usize << orbits.len()) {
-        let mut mask = 0u64;
-        for (index, orbit) in orbits.iter().enumerate() {
-            if choice & (1 << index) != 0 {
-                mask |= orbit;
-            }
-        }
-        if full_bounding_box(mask, width, height) && connected(mask, width, height) {
+        // 二进制序号对应的 Gray code 每次只翻转一个轨道。
+        mask ^= orbits[choice.trailing_zeros() as usize];
+        // 180° 把上边映到下边、左边映到右边；90° 把四边循环置换。
+        let touches_all_sides =
+            mask & boundaries[0] != 0 && (quarter_turn || mask & boundaries[2] != 0);
+        if touches_all_sides && connected(mask, width, height) {
             if has_hole(mask) {
                 counts.has_hole += 1;
             } else {
@@ -254,37 +241,27 @@ fn symmetric_bbox(width: usize, height: usize, quarter_turn: bool) -> Counts {
 /// 返回 n=1..max_n 的 one-sided 累计结果；镜像保持不同。
 pub fn enumerate_transfer(max_n: usize, verbose: bool) -> Vec<RoomCount> {
     assert!(max_n <= MAX_N, "位图及前沿仅支持 n≤{MAX_N}");
-    let mut placements = vec![vec![Counts::default(); max_n + 1]; max_n + 1];
-    for width in 1..=max_n {
-        for height in width..=max_n {
-            let counts = connected_placements(width, height);
-            placements[width][height] = counts;
-            placements[height][width] = counts;
-        }
-    }
-    let mut fixed = Counts::default();
+    let mut previous_square = Counts::default();
     let mut sym180 = Counts::default();
     let mut sym90 = Counts::default();
     let mut result = Vec::with_capacity(max_n);
     for n in 1..=max_n {
-        // 二维差分逐个紧包围盒计一次；累计到 n 后等价于 C(n,n) 的双重一阶差分。
-        fixed.no_hole =
-            placements[n][n].no_hole - placements[n - 1][n].no_hole - placements[n][n - 1].no_hole
-                + placements[n - 1][n - 1].no_hole;
-        fixed.has_hole = placements[n][n].has_hole
-            - placements[n - 1][n].has_hole
-            - placements[n][n - 1].has_hole
-            + placements[n - 1][n - 1].has_hole;
-        for width in 1..=n {
-            for height in 1..=n {
-                if width.max(height) == n {
-                    sym180.add(symmetric_bbox(width, height, false));
-                    if width == height {
-                        sym90.add(symmetric_bbox(width, height, true));
-                    }
-                }
-            }
+        // C(w,h)=C(h,w)，故二维差分只需当前正方形、相邻窄矩形和前一正方形。
+        let square = connected_placements(n, n);
+        let strip = connected_placements(n - 1, n);
+        let fixed = Counts {
+            no_hole: square.no_hole + previous_square.no_hole - 2 * strip.no_hole,
+            has_hole: square.has_hole + previous_square.has_hole - 2 * strip.has_hole,
+        };
+        previous_square = square;
+        // 转置给出 w×n 与 n×w 间保留连通和孔分类的一一对应。
+        for width in 1..n {
+            let count = symmetric_bbox(width, n, false);
+            sym180.add(count);
+            sym180.add(count);
         }
+        sym180.add(symmetric_bbox(n, n, false));
+        sym90.add(symmetric_bbox(n, n, true));
         let total_num = fixed.total() + 2 * sym90.total() + sym180.total();
         let no_hole_num = fixed.no_hole + 2 * sym90.no_hole + sym180.no_hole;
         let has_hole_num = fixed.has_hole + 2 * sym90.has_hole + sym180.has_hole;
@@ -444,7 +421,7 @@ mod tests {
                             }
                         }
                         if mask == rotated
-                            && full_bounding_box(mask, width, height)
+                            && full_bounding_box(mask, boundary_masks(width, height))
                             && connected(mask, width, height)
                         {
                             if has_hole(mask) {

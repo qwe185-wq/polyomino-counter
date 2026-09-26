@@ -29,49 +29,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 ///
 /// 将形状绕原点旋转 180°，再平移归一化，比较是否相等。
 pub fn has_symmetry_180(cells: Mask, w: usize, h: usize) -> bool {
-    // 旋转 180°: (r, c) → (-r, -c) 相对于几何中心
-    // 更简单的方法: 将每个 cell 绕原点 180°: (r, c) → (h-1-r, w-1-c)
-    // 然后平移归一化
-    let mut rotated: Mask = 0;
-    let mut m = cells;
-    while m != 0 {
-        let bit = m.trailing_zeros() as usize;
-        let r = (bit >> STRIDE_SHIFT) as i32;
-        let c = (bit & (STRIDE - 1)) as i32;
-        // 绕包围盒中心旋转 180°
-        let nr = (h - 1) as i32 - r;
-        let nc = (w - 1) as i32 - c;
-        rotated |= 1u64 << ((nr as usize) * STRIDE + (nc as usize));
-        m &= m - 1;
-    }
-    let (norm, _, _) = normalize_translation(rotated);
-    let (orig_norm, _, _) = normalize_translation(cells);
-    norm == orig_norm
+    cells == cells.reverse_bits() >> (64 - ((h - 1) * STRIDE + w))
 }
 
 /// 检查 Fixed 形状是否具有 90° 旋转对称性
 ///
 /// 将形状绕原点旋转 90°，再平移归一化，比较是否相等。
 pub fn has_symmetry_90(cells: Mask, w: usize, h: usize) -> bool {
-    // 90° 对称要求 w == h（正方形包围盒）
-    if w != h {
-        return false;
-    }
-    // 旋转 90° CW: (r, c) → (c, w-1-r)
-    let mut rotated: Mask = 0;
-    let mut m = cells;
-    while m != 0 {
-        let bit = m.trailing_zeros() as usize;
-        let r = (bit >> STRIDE_SHIFT) as i32;
-        let c = (bit & (STRIDE - 1)) as i32;
-        let nr = c;
-        let nc = (w - 1) as i32 - r;
-        rotated |= 1u64 << ((nr as usize) * STRIDE + (nc as usize));
-        m &= m - 1;
-    }
-    let (norm, _, _) = normalize_translation(rotated);
-    let (orig_norm, _, _) = normalize_translation(cells);
-    norm == orig_norm
+    w == h && rotate90(cells, w, h).0 == cells
 }
 
 // ================================================================

@@ -1,43 +1,25 @@
-//! 分片并发哈希集 — 消除临界区争用的核心组件
-//!
-//! ## 设计
-//!
-//! - **4096 个分片**（2^12），每个分片独立 `parking_lot::RwLock<FxHashSet<u64>>`
-//! - **读路径**：`RwLock::read()` 允许多读者并发，实际无锁
-//! - **写路径**：仅锁单个分片，32 线程争用同一分片概率 ~0.8%
-//! - **哈希**：FxHash（rustc-hash），整数 key 极快（~1ns）
-//!
-//! ## 与 C 版本对比
-//!
-//! | 方面 | C 版本 (main) | Rust 版本 |
-//! |------|--------------|----------|
-//! | 并发控制 | 单一 `omp critical` | 4096 分片 fine-grained |
-//! | 等锁占比 | 69% | < 5% |
-//! | 写入开销 | 全局互斥 | 分片内互斥 |
-//! | 内存模型 | 不安全（人工保证） | 编译期 Send+Sync 安全 |
+//! 按代规模自适应的分片哈希集；每片串行插入，片间可并行。
 
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
-/// 分片数量（2 的幂）
-/// 1024 分片 → 32 线程竞争同一分片概率 ~3%（远低于 C 版的 100%）
+/// 分片数量上限（实际数量按代规模取2的幂）。
 const SHARD_BITS: usize = 10;
 const SHARD_COUNT: usize = 1 << SHARD_BITS;
-const SHARD_MASK: usize = SHARD_COUNT - 1;
 
 /// 单个分片
 struct Shard {
-    set: RwLock<FxHashSet<u64>>,
+    set: Mutex<FxHashSet<u64>>,
 }
 
 impl Shard {
     fn new(capacity: usize) -> Self {
         // 预分配但限制上限: 每分片最多 128K 条目 (~1MB)，超大代让哈希集自行扩展
         // 平衡预分配收益 (减少 rehash) 与峰值内存
-        let cap = capacity.min(131_072).max(1024);
+        let cap = capacity.min(131_072);
         Self {
-            set: RwLock::new(FxHashSet::with_capacity_and_hasher(
+            set: Mutex::new(FxHashSet::with_capacity_and_hasher(
                 cap,
                 rustc_hash::FxBuildHasher,
             )),
@@ -57,9 +39,13 @@ impl ShardedHashSet {
     ///
     /// `total_capacity`: 预估总容量，均匀分配到各分片。
     pub fn new(total_capacity: usize) -> Self {
-        let per_shard = (total_capacity / SHARD_COUNT).max(16);
-        let mut shards = Vec::with_capacity(SHARD_COUNT);
-        for _ in 0..SHARD_COUNT {
+        let count = total_capacity
+            .div_ceil(256)
+            .next_power_of_two()
+            .clamp(1, SHARD_COUNT);
+        let per_shard = total_capacity.div_ceil(count);
+        let mut shards = Vec::with_capacity(count);
+        for _ in 0..count {
             shards.push(Arc::new(Shard::new(per_shard)));
         }
         Self { shards }
@@ -76,17 +62,17 @@ impl ShardedHashSet {
 
     /// 获取 key 对应的分片索引
     #[inline]
-    fn shard_idx(key: u64) -> usize {
-        (Self::hash(key) as usize) & SHARD_MASK
+    fn shard_idx(&self, key: u64) -> usize {
+        (Self::hash(key) as usize) & (self.shards.len() - 1)
     }
 
-    /// 查询 key 是否存在（无锁读，多读者并发）
+    /// 锁内查询，仅测试和辅助接口使用。
     ///
-    /// `RwLock::read()` 允许多个线程同时读取，仅在写入时阻塞。
+    /// 读写均使用同一个分片锁。
     #[inline]
     pub fn contains(&self, key: u64) -> bool {
-        let idx = Self::shard_idx(key);
-        self.shards[idx].set.read().contains(&key)
+        let idx = self.shard_idx(key);
+        self.shards[idx].set.lock().contains(&key)
     }
 
     /// 插入 key（仅锁单个分片）
@@ -94,13 +80,13 @@ impl ShardedHashSet {
     /// 返回 `true` 表示新插入，`false` 表示已存在。
     #[inline]
     pub fn insert(&self, key: u64) -> bool {
-        let idx = Self::shard_idx(key);
-        self.shards[idx].set.write().insert(key)
+        let idx = self.shard_idx(key);
+        self.shards[idx].set.lock().insert(key)
     }
 
     /// 获取元素总数（遍历所有分片，仅用于统计）
     pub fn total_count(&self) -> usize {
-        self.shards.iter().map(|s| s.set.read().len()).sum()
+        self.shards.iter().map(|s| s.set.lock().len()).sum()
     }
 
     /// 批量插入 4 个旋转方向（用于偶尔需要的 One-sided 规范化）
@@ -117,14 +103,9 @@ impl ShardedHashSet {
     /// 返回 `true` 表示是新 key 并已插入。
     #[inline]
     pub fn check_and_insert(&self, key: u64) -> bool {
-        let idx = Self::shard_idx(key);
-        let mut set = self.shards[idx].set.write();
-        if set.contains(&key) {
-            false
-        } else {
-            set.insert(key);
-            true
-        }
+        let idx = self.shard_idx(key);
+        let mut set = self.shards[idx].set.lock();
+        set.insert(key)
     }
 }
 
@@ -197,7 +178,7 @@ mod tests {
         // Only one set of insertions should succeed
         let total: usize = results.iter().sum();
         assert_eq!(hs.total_count(), 1000);
-        // Total "successful" insertions across all threads should be >= 1000
-        assert!(total >= 1000);
+        // 同一个key恰好一次成功，不能仅检查下界。
+        assert_eq!(total, 1000);
     }
 }

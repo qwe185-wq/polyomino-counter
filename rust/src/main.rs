@@ -1,149 +1,167 @@
-//! 多联骨牌房间计数 — Rust 实现
-//!
-//! ## 算法
-//!
-//! 1. **Fixed BFS + Burnside** (主算法): 逐代生成 + 内联对称检测 + 分片哈希
-//! 2. **Redelmeier DFS** (WIP): Untried Set + 半平面约束 (n=1-2 已验证)
-
+//! 精确计数使用前沿 DP；需要完整数据集时使用并行 BFS。
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 mod bit_utils;
 mod burnside;
 mod export;
 mod fixed;
 mod hashset;
-mod jensen;
-mod redelmeier;
 mod symmetric;
+mod transfer;
 mod types;
+#[cfg(test)]
+mod validation;
 
-use crate::burnside::apply_burnside;
-use crate::export::ExportManager;
-use crate::fixed::enumerate_fixed_with_symmetry;
-use crate::types::*;
-use clap::Parser;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Instant;
+use clap::{Parser, ValueEnum};
+use std::{io, path::PathBuf, process::ExitCode, sync::Arc, time::Instant};
+use types::MAX_N;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Algorithm {
+    Auto,
+    Transfer,
+    Bfs,
+    Canonical,
+}
+
+fn parse_n(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (1..=MAX_N).contains(n))
+        .ok_or_else(|| format!("n 必须在1..={MAX_N}范围内"))
+}
 
 #[derive(Parser, Debug)]
-#[command(name = "room-count")]
+#[command(
+    name = "room-count",
+    about = "精确统计 one-sided 房间形状；n 必须显式指定"
+)]
 struct Args {
-    #[arg(default_value_t = MAX_N)]
+    #[arg(value_parser=parse_n)]
     n: usize,
     #[arg(short, long)]
     verbose: bool,
-    /// 使用 Redelmeier DFS (实验性)
-    #[arg(long)]
-    dfs: bool,
-    /// 使用 Jensen 转移矩阵法
-    #[arg(long)]
+    /// auto：纯计数使用前沿DP，导出使用one-sided BFS
+    #[arg(long, value_enum, default_value = "auto")]
+    algorithm: Algorithm,
+    /// 兼容旧参数，使用已经验证的新前沿DP
+    #[arg(long,hide=true,conflicts_with_all=["export","algorithm"])]
     jensen: bool,
-    /// 导出 Fixed mask 二进制数据 + 7-zip 压缩
+    /// 导出全部one-sided最小旋转代表
     #[arg(long)]
     export: bool,
-    /// 导出目录（默认: output）
+    /// 必须为不存在或空目录，拒绝覆盖已有数据集
     #[arg(long, default_value = "output")]
     export_dir: PathBuf,
+    /// 保留裸bin，跳过ZIP压缩
+    #[arg(long, requires = "export")]
+    no_compress: bool,
+    /// ZIP压缩等级0..9，默认1优先吞吐
+    #[arg(long,default_value_t=1,value_parser=clap::value_parser!(u8).range(0..=9))]
+    compression_level: u8,
 }
 
-fn main() {
-    let args = Args::parse();
-    let max_n = args.n.clamp(1, MAX_N);
-
-    println!("═══════════════════════════════════════════════════════════");
-    if args.dfs {
-        println!("  多联骨牌房间计数 — Redelmeier DFS (实验性)");
-    } else {
-        println!("  多联骨牌房间计数 — Fixed BFS + Burnside 引理");
-    }
-    println!("  n={}  mimalloc  1024分片并发哈希", max_n);
-    println!("═══════════════════════════════════════════════════════════\n");
-
+fn run(args: Args) -> io::Result<()> {
     let total_start = Instant::now();
-
-    // 初始化导出
-    let export_mgr: Option<Arc<ExportManager>> = if args.export {
-        println!("── 导出模式: Fixed mask → {} ──", args.export_dir.display());
-        match ExportManager::new(&args.export_dir) {
-            Ok(mgr) => Some(Arc::new(mgr)),
-            Err(e) => {
-                eprintln!("  [导出] 初始化失败: {}", e);
-                return;
-            }
-        }
+    let algorithm = match args.algorithm {
+        Algorithm::Auto if args.export => Algorithm::Canonical,
+        Algorithm::Auto => Algorithm::Transfer,
+        algorithm => algorithm,
+    };
+    if args.export && algorithm == Algorithm::Transfer {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "前沿DP只计数；导出请使用 --algorithm canonical 或 auto",
+        ));
+    }
+    let title = match algorithm {
+        Algorithm::Transfer => "前沿 DP + 对称轨道 + Burnside",
+        Algorithm::Canonical => "并行 One-sided BFS + 轨道计数",
+        _ => "并行 Fixed BFS + Burnside",
+    };
+    println!("多联骨牌房间计数 — {title}\nn={}", args.n);
+    let manager = if args.export {
+        Some(Arc::new(export::ExportManager::new(&args.export_dir)?))
     } else {
         None
     };
-
-    let results = if args.jensen {
-        println!("── Jensen 转移矩阵法 ──");
-        if args.export {
-            eprintln!("  [导出] 警告: Jensen 模式不支持导出，忽略 --export");
-        }
-        crate::jensen::enumerate_jensen(max_n, args.verbose)
-    } else if args.dfs {
-        println!("── Redelmeier DFS 枚举 ──");
-        if args.export {
-            eprintln!("  [导出] 警告: DFS 模式不支持导出，忽略 --export");
-        }
-        crate::redelmeier::enumerate_redelmeier(max_n, args.verbose)
-    } else {
-        println!("── Fixed BFS 枚举 + 对称性检测 ──");
-        let (fixed, sym90, sym180) =
-            enumerate_fixed_with_symmetry(max_n, args.verbose, export_mgr.clone());
-        let os = apply_burnside(&fixed, &sym90, &sym180);
-
-        if args.verbose {
-            println!("\n  Fixed + Sym 分解:");
-            for i in 0..max_n {
-                let f = &fixed[i]; let s90 = &sym90[i]; let s180 = &sym180[i];
-                let sum = f.total + 2*s90.total + s180.total;
-                println!("  n={}: Fixed={} Sym90={} Sym180={} sum={} sum%4={} OS={}",
-                         f.n, f.total, s90.total, s180.total, sum, sum%4, os[i].total);
+    let compute_start = Instant::now();
+    let results = match algorithm {
+        Algorithm::Transfer => transfer::enumerate_transfer(args.n, args.verbose),
+        Algorithm::Bfs | Algorithm::Canonical => {
+            let (fixed, s90, s180) = if algorithm == Algorithm::Canonical {
+                fixed::enumerate_canonical(args.n, args.verbose, manager.clone())?
+            } else {
+                fixed::enumerate_fixed_with_symmetry(args.n, args.verbose, manager.clone())?
+            };
+            if args.verbose {
+                for ((f, a), b) in fixed.iter().zip(&s90).zip(&s180) {
+                    eprintln!(
+                        "  n={} Fixed={} Sym90={} Sym180={}",
+                        f.n, f.total, a.total, b.total
+                    );
+                }
             }
+            burnside::apply_burnside(&fixed, &s90, &s180)
         }
-        os
+        Algorithm::Auto => unreachable!(),
     };
-
-    let total_elapsed = total_start.elapsed();
-
-    println!();
-    println!("  ╔══════════════════════════════════════════════════════╗");
-    println!("  ║         One-sided Polyomino 枚举结果                  ║");
-    println!("  ╠═════╤══════════╤══════════╤══════════╤═══════════════╣");
-    println!("  ║  n  │  总房间数  │  无洞     │  有洞     │  验证        ║");
-    println!("  ╟─────┼──────────┼──────────┼──────────┼───────────────╢");
-
-    let known: &[(usize, u64, u64, u64)] = &[
-        (1, 1, 1, 0), (2, 4, 4, 0), (3, 46, 44, 2),
-        (4, 2404, 1899, 505), (5, 520818, 267976, 252842),
-    ];
-
-    let mut all_ok = true;
-    for r in &results {
-        let (e_t, e_n, e_h) = if r.n <= known.len() {
-            (known[r.n-1].1, known[r.n-1].2, known[r.n-1].3)
-        } else { (0,0,0) };
-        let ok = r.n > known.len() || (r.total == e_t && r.no_hole == e_n && r.has_hole == e_h);
-        if !ok { all_ok = false; }
-        println!("  ║ {:-3} │ {:>8} │ {:>8} │ {:>8} │ {:>11} ║",
-                 r.n, r.total, r.no_hole, r.has_hole,
-                 if r.n > known.len() { "新结果" } else if ok { "✓" } else { "✗" });
+    let compute_elapsed = compute_start.elapsed();
+    if !burnside::verify_results(&results) {
+        return Err(io::Error::other("已知计数校验失败"));
     }
-    println!("  ╚═════╧══════════╧══════════╧══════════╧═══════════════╝");
-
-    println!("\n  ⏱ 总耗时: {:.3}s", total_elapsed.as_secs_f64());
-    if all_ok && max_n <= 5 { println!("\n  ✓ 所有已知结果验证通过！"); }
-
-    // 7-zip 压缩
-    if let Some(ref mgr) = export_mgr {
-        println!();
-        println!("── 7-zip 压缩 ──");
-        if let Err(e) = mgr.compress_7z() {
-            eprintln!("  [压缩] 错误: {}", e);
+    for r in &results {
+        println!("{r}");
+    }
+    println!("算法耗时: {:.6}s", compute_elapsed.as_secs_f64());
+    if let Some(manager) = manager {
+        if !args.no_compress {
+            let compress_start = Instant::now();
+            manager.compress_7z(args.compression_level)?;
+            println!("压缩耗时: {:.6}s", compress_start.elapsed().as_secs_f64());
         }
-        println!("\n  导出目录: {}", args.export_dir.display());
+        let count = results.last().unwrap().total;
+        let dataset_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let manifest = format!(
+            concat!("{{\n  \"format_version\": 1,\n  \"dataset_id\": \"{}-{}\",\n",
+            "  \"max_n\": {},\n  \"count\": {},\n  \"equivalence\": \"one-sided\",\n",
+            "  \"encoding\": \"u64-le-stride8\",\n  \"representative\": \"minimum-rotation\",\n",
+            "  \"category_dimension\": \"exact-max-bounding-box\",\n",
+            "  \"ordering\": \"parallel-unspecified\",\n  \"complete\": true\n}}\n"),
+            dataset_id,
+            std::process::id(),
+            args.n,
+            count
+        );
+        std::fs::write(args.export_dir.join("dataset.json"), manifest)?;
+        println!(
+            "导出目录: {}（新数据集，旧 global_index 不可复用）",
+            args.export_dir.display()
+        );
+    }
+    println!("总耗时: {:.6}s", total_start.elapsed().as_secs_f64());
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    match run(Args::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("错误: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    #[test]
+    fn no_implicit_large_run() {
+        assert!(Args::try_parse_from(["room-count"]).is_err());
     }
 }

@@ -46,13 +46,11 @@ pub fn apply_burnside(
 
         // One-sided = (Fixed + 2·Sym90 + Sym180) / 4
         let total_num = fixed[i].total + 2 * sym90[i].total + sym180[i].total;
-        let nohole_num =
-            fixed[i].no_hole + 2 * sym90[i].no_hole + sym180[i].no_hole;
-        let hole_num =
-            fixed[i].has_hole + 2 * sym90[i].has_hole + sym180[i].has_hole;
+        let nohole_num = fixed[i].no_hole + 2 * sym90[i].no_hole + sym180[i].no_hole;
+        let hole_num = fixed[i].has_hole + 2 * sym90[i].has_hole + sym180[i].has_hole;
 
         // 验证整数性
-        debug_assert!(
+        assert!(
             total_num % 4 == 0,
             "Burnside non-integer: n={}, total={} (fixed={}, sym90={}, sym180={})",
             n,
@@ -61,6 +59,10 @@ pub fn apply_burnside(
             sym90[i].total,
             sym180[i].total
         );
+
+        assert_eq!(nohole_num % 4, 0, "Burnside no-hole n={n}");
+        assert_eq!(hole_num % 4, 0, "Burnside has-hole n={n}");
+        assert_eq!(total_num, nohole_num + hole_num, "分类之和 n={n}");
 
         results.push(RoomCount {
             n,
@@ -111,16 +113,46 @@ mod tests {
     fn test_burnside_formula_integer() {
         // 构造简单测试数据确保 Burnside 公式产生整数
         let fixed = vec![
-            RoomCount { n: 1, total: 1, no_hole: 1, has_hole: 0 },
-            RoomCount { n: 2, total: 10, no_hole: 10, has_hole: 0 },
+            RoomCount {
+                n: 1,
+                total: 1,
+                no_hole: 1,
+                has_hole: 0,
+            },
+            RoomCount {
+                n: 2,
+                total: 10,
+                no_hole: 10,
+                has_hole: 0,
+            },
         ];
         let sym90 = vec![
-            RoomCount { n: 1, total: 1, no_hole: 1, has_hole: 0 },
-            RoomCount { n: 2, total: 2, no_hole: 2, has_hole: 0 },
+            RoomCount {
+                n: 1,
+                total: 1,
+                no_hole: 1,
+                has_hole: 0,
+            },
+            RoomCount {
+                n: 2,
+                total: 2,
+                no_hole: 2,
+                has_hole: 0,
+            },
         ];
         let sym180 = vec![
-            RoomCount { n: 1, total: 1, no_hole: 1, has_hole: 0 },
-            RoomCount { n: 2, total: 2, no_hole: 2, has_hole: 0 },
+            RoomCount {
+                n: 1,
+                total: 1,
+                no_hole: 1,
+                has_hole: 0,
+            },
+            RoomCount {
+                n: 2,
+                total: 2,
+                no_hole: 2,
+                has_hole: 0,
+            },
         ];
 
         let results = apply_burnside(&fixed, &sym90, &sym180);

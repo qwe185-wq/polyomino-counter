@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Performance (2026-09-26)
+- 默认精确计数改为前沿DP、独立旋转轨道及Burnside；n=5内部算法中位0.570ms（旧版205ms）。
+- 导出默认直接枚举one-sided等价类，加入位前沿、位旋转、欧拉洞判定、局部归并统计和有界写缓冲。
+- ZIP默认等级1；支持 `--compression-level 9` 和 `--no-compress`，分别报告算法、压缩和总时间。
+- 新增独立穷举、三路线计数、完整导出集合、CLI和错误路径验证；本轮未运行n=6。
+
+### Changed (2026-09-26)
+- n改为必填并严格校验；`--algorithm auto|transfer|bfs|canonical`。
+- 旧错误DFS/Jensen退出生产入口；`--jensen`兼容新DP，移除`--dfs`。
+- 拒绝非空导出目录并写入独立数据集清单；旧global_index不能直接用于新并行输出。
+- 写盘和压缩失败返回非零，不将部分导出报告为成功。
+
 ### Added
 - **One-sided 二进制导出**（`--export`）：枚举时内联计算 One-sided canonical（4 旋转取最小），流式写入分块 `.bin` 文件
 - **7-zip 自动压缩**：导出完成后自动调用 7-zip，删除原始 `.bin` 目录

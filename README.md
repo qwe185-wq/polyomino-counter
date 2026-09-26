@@ -1,128 +1,106 @@
-# room-count — 多联骨牌房间计数
+# room-count — 房间形状精确计数与导出
 
-统计 n×n 正方形网格中用墙和门围成的不同房间形状的数量。
+统计能嵌入 n×n 正方形网格的非空边连通格子集合。平移、旋转合并，镜像保持不同（one-sided polyomino）；分别统计总数、无洞和有洞。这里计的是形状，不区分门的位置或数量。洞按空格的四邻接可达性判断，对角缝隙不算通道。
 
-## 问题描述
+Rust 主程序提供两条默认路线：
 
-在 n×n（n ≤ 6）的正方形网格中：
-- 每条边可以放置**墙**、**门**或**不放**
-- 墙和门围成的封闭连通区域称为**房间**
-- 房间必须有至少一个门，内部不能有门
-- 整个网格只有一个房间
-- 房间对方向与位置不敏感（**One-sided**：允许旋转+平移，禁止翻转）
+- **只计数：前沿连通性 DP + 旋转轨道枚举 + Burnside**，不保存每个形状。
+- **导出：并行 one-sided BFS**，每个旋转等价类只保留一个最小位图代表。
 
-问题等价于：统计所有能嵌入 n×n 网格的 **one-sided polyomino**，并分类为有洞/无洞。
+原 Fixed BFS 可显式选择，作为交叉验证和性能比较。旧 `jensen.rs`、`redelmeier.rs` 保留为历史实验源码，不再编入生产入口；旧 `--jensen` 参数调用新的正确 DP，`--dfs` 已移除。C 目录保留历史实现，不作为当前高性能入口。
 
-## 实现
+## 构建与使用
 
-| 语言 | 算法 | n=5 | n=6 | 内存 |
-|------|------|-----|-----|------|
-| **C** | BFS + Burnside | 0.59s | 6min (未完成) | ~8GB |
-| **Rust** | BFS + Burnside + Rayon | 0.21s | 328s | ~8GB |
-| Rust (实验) | Redelmeier DFS | ~37s | — | O(n) 栈 |
-| Rust (实验) | Jensen 转移矩阵 | <1ms | — | 极小 |
-| **Rust + export** | BFS + One-sided 导出 + 7z | <1s | ~655s | ~9GB |
-
-## 构建
-
-### C 版本
-
-```bash
-cd C
-make          # 编译（-O3 优化）
-make run      # 编译并运行
-make clean    # 清理
-```
-
-**依赖**：GCC（MinGW-w64 或 Linux GCC），仅标准库。
-
-### Rust 版本
-
-```bash
+```powershell
 cd rust
-cargo build --release             # 编译
-cargo run --release -- 5          # 枚举 n=5
-cargo run --release -- 6 --export # 枚举 + 导出 One-sided 二进制数据
-cargo test --release              # 测试
+cargo build --release --locked
+
+# n 是必填参数，无参数不会启动计算
+cargo run --release -- 5
+cargo run --release -- 5 --algorithm canonical
+cargo run --release -- 5 --algorithm bfs --verbose
+
+# 每次使用新的目录；默认 ZIP 压缩等级1
+cargo run --release -- 5 --export --export-dir output_n5_new
+
+# 裸二进制，跳过压缩
+cargo run --release -- 5 --export --no-compress --export-dir output_n5_raw
+
+# 更高压缩率，耗时也更长
+cargo run --release -- 5 --export --compression-level 9 --export-dir output_n5_zip9
+
+cargo test --release --locked
+cargo test --locked
 ```
 
-**依赖**：Rust 工具链（cargo），依赖库见 `rust/Cargo.toml`。
+实现的尺寸上限仍为 6；本轮性能改造的测试、基准和导出验证全部限制在 n≤5。**n=6 尚未重新验证，运行前须取得用户单独允许。**测试和 `transfer_probe` 不会自动运行 n=6。
 
-### 导出工具
+ZIP 压缩需要 7-Zip。Windows 自动检测常用安装位置，否则从 PATH 查找 `7z`；可用环境变量 `ROOM_COUNT_7Z` 指定可执行文件。使用 `--no-compress` 不需要 7-Zip。算法和输出编码不依赖新的外部库。
 
-```bash
-# 去重验证（两阶段：hash 分片 + rayon 并行排序）
-cargo run --release --bin dedup_check -- output/all_fixed.zip
+## 性能
 
-# 形状提取与可视化
-python read_shapes.py output/all_fixed.zip --info              # 文件摘要（零解压）
-python read_shapes.py output/all_fixed.zip --txt --limit 10    # 前 10 个形状
-python read_shapes.py output/all_fixed.zip --ascii --from 1000 --to 1005  # 指定范围
-```
+2026-09-26，Windows x86_64、Rust 1.97.1，Rayon 32 线程，release 默认可移植编译配置。n=5，每种计数预热一次后交替测量9次；导出预热一次后测3次。下表为中位数。
 
-## 项目结构
+| 路线 | 算法耗时 | 完整进程耗时 |
+|---|---:|---:|
+| 改造前 Fixed BFS | 205 ms | 227 ms |
+| 新前沿 DP（默认计数） | **0.570 ms** | **11.2 ms** |
+| 优化后 Fixed BFS | 68.3 ms | 81.9 ms |
+| 新 one-sided BFS | 29.0 ms | 41.2 ms |
+| 改造前导出 + ZIP9 | 282 ms | 3.275 s |
+| 新导出 + ZIP9 | 34.1 ms | 2.923 s |
+| 新导出 + ZIP1（默认） | 34.8 ms | **0.389 s** |
+| 新导出、不压缩 | 34.5 ms | **0.050 s** |
 
-```
-room-count/
-├── C/                    # C 实现
-│   ├── Makefile
-│   ├── docs/HANDOFF.md
-│   └── src/
-│       ├── common.h      # 通用类型与宏
-│       ├── hashset.h/c   # 哈希集合（去重）
-│       ├── enumerate.h/c # 枚举引擎
-│       ├── timer.h       # 计时模块
-│       └── main.c        # 入口 + 输出
-├── rust/                 # Rust 实现
-│   ├── Cargo.toml
-│   ├── docs/HANDOFF-RUST.md
-│   ├── src/
-│   │   ├── main.rs       # 入口 + CLI（--export --jensen --dfs）
-│   │   ├── types.rs      # 核心类型
-│   │   ├── bit_utils.rs  # 位运算 + 洞检测 + 旋转 + 归一化
-│   │   ├── hashset.rs    # 分片并发哈希集
-│   │   ├── fixed.rs      # BFS 枚举 + 对称检测 + One-sided 去重
-│   │   ├── export.rs     # 分块二进制导出 + 7z 压缩
-│   │   ├── symmetric.rs  # 90°/180° 旋转对称
-│   │   ├── burnside.rs   # Burnside 引理
-│   │   ├── redelmeier.rs # Redelmeier DFS (实验)
-│   │   ├── jensen.rs     # Jensen 转移矩阵 (实验)
-│   │   └── bin/
-│   │       └── dedup_check.rs  # 并行去重验证工具
-│   └── output_n6/        # n=6 导出结果（.gitignore 排除）
-├── read_shapes.py        # 形状提取脚本（支持 .zip 流式读取）
-├── docs/
-│   ├── plans/            # 实施计划
-│   └── .lifecycle/       # 编排器状态
-├── README.md
-└── CHANGELOG.md
-```
+计数算法约快 360 倍，但包含启动开销的 CLI 约快20倍，不能混用这两种口径。默认导出总耗时约缩短到原来的1/8.4，既包括枚举优化也包括降低压缩等级；保持 ZIP9 时，压缩仍是主要耗时。
 
-## 结果
+ZIP 总体积的一个 n=5 样本：旧 ZIP9 2.60 MB，新 ZIP9 2.47 MB，新 ZIP1 3.18 MB。并行导出顺序不固定，因此压缩体积可略有变化。详见 [性能实现与验证](docs/performance-2026-09-26.md)。上述数据不能外推为 n=6 的实测速度或峰值内存。
 
-| n | 总房间数 | 无洞（亏格0） | 有洞（亏格≥1） |
-|---|---------|-------------|---------------|
+## 结果与正确性
+
+| n | 总数 | 无洞 | 有洞 |
+|---:|---:|---:|---:|
 | 1 | 1 | 1 | 0 |
 | 2 | 4 | 4 | 0 |
 | 3 | 46 | 44 | 2 |
 | 4 | 2,404 | 1,899 | 505 |
 | 5 | 520,818 | 267,976 | 252,842 |
-| **6** | **410,964,612** | **112,877,832** | **298,086,780** |
+| 6（历史结果，本轮未复验） | 410,964,612 | 112,877,832 | 298,086,780 |
 
-n=6 由 Rust BFS 计算（328s 枚举，~655s 含导出+压缩，~9GB RAM）。
+新 DP、Fixed BFS、one-sided BFS 在 n≤5 的三类计数一致。测试用独立坐标/洪泛 oracle 穷举 n≤4，验证形状、旋转、洞、导出集合；还校验小矩形 DP 和旋转固定点。实际 n=5 旧版 ZIP9、新版 ZIP9/ZIP1 各有520,818个不重复形状，完整集合相同。
 
-### 导出数据集
+## 数据格式与兼容性
 
-`rust/output_n6/` 包含 n=6 全部 410,964,612 个 One-sided polyomino：
+每个 mask 为8字节 u64 little-endian，格子 `(row,col)` 对应 bit `row*8+col`，紧包围盒左上对齐，取4个旋转中位图值最小的代表。每10,000,000条记录分一个 chunk。
 
-| 文件 | 大小 | 内容 |
-|------|------|------|
-| `all_fixed.zip` | 1.0 GB | 全部（42 个 chunk，每块 10M masks） |
-| `no_holes/n06_fixed.zip` | 288 MB | 无洞（112,877,832） |
-| `with_holes/n06_fixed.zip` | 742 MB | 有洞（298,086,780） |
+```text
+output_n5_new/
+├── dataset.json
+├── all_fixed.zip
+├── no_holes/n01_fixed.zip … n05_fixed.zip
+└── with_holes/n03_fixed.zip … n05_fixed.zip
+```
 
-二进制格式：每个形状 8 字节 u64 LE（规范化位图，stride=8，左上角对齐）。
+`fixed` 是兼容历史工具的文件名，文件内容实际为 **one-sided**。分类文件的 nXX 表示最大包围盒边长**恰好为XX**，程序的 n 行表示边长**不超过n**的累计值。空分类不生成文件。裸导出使用同名目录和 `shapes_000001.bin`。
 
-## 许可
+导出拒绝非空目录，避免覆盖现有数据。每个成功完成的数据集有独立 `dataset_id`；顺序标记为 `parallel-unspecified`。**形状集合保持兼容，但旧 ZIP 的 global_index 不能直接用于新 ZIP。**外部 Parquet、landmarks 和游戏资产必须绑定原数据集，或对新数据重新建立索引。写盘、压缩失败返回非零状态；失败任务不会生成 `complete: true` 清单，原始数据保留用于排查。
 
-MIT
+现有读取工具仍可使用：
+
+```powershell
+python read_shapes.py rust/output_n5_new/all_fixed.zip --info
+python read_shapes.py rust/output_n5_new/all_fixed.zip --ascii --limit 10
+```
+
+`dedup_check` 是历史辅助工具，只能检查部分性质；完整正确性以回归测试、分类计数和集合对照为准。
+
+## 主要代码
+
+- `rust/src/transfer.rs`：前沿分量状态、增量欧拉特征、差分去平移、旋转轨道。
+- `rust/src/fixed.rs`：两种 BFS、位前沿、分块任务、局部统计和流式导出。
+- `rust/src/bit_utils.rs`：位矩阵旋转、平移归一化、欧拉洞检测。
+- `rust/src/export.rs`：惰性分配输出槽、新目录保护、可选 ZIP。
+- `rust/src/validation.rs`、`rust/tests/cli.rs`：独立 oracle、全集合、CLI及失败路径回归。
+- `rust/scripts/benchmark.ps1`：指定旧版 executable 后复现 n≤5 对照基准。
+
+MIT。

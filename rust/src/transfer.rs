@@ -3,7 +3,7 @@
 use crate::types::{RoomCount, MAX_N};
 use rustc_hash::FxHashMap;
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct State {
     // 扫描线左侧是新行，右侧是旧行；0 表示空格。
     labels: [u8; MAX_N],
@@ -12,6 +12,32 @@ struct State {
     // 0=尚未开始，1=仍有活跃前景，2=唯一组件已经关闭。
     phase: u8,
     chi: i8,
+}
+
+impl State {
+    // 6×3 位标签、1 位角占用、2 位阶段、8 位有符号 χ，共29位。
+    fn packed(self) -> u32 {
+        let mut key = 0u32;
+        for (index, label) in self.labels.iter().enumerate() {
+            key |= (*label as u32) << (3 * index);
+        }
+        key | ((self.old_left as u32) << 18)
+            | ((self.phase as u32) << 19)
+            | ((self.chi as u8 as u32) << 21)
+    }
+
+    fn unpack(key: u32) -> Self {
+        let mut labels = [0; MAX_N];
+        for (index, label) in labels.iter_mut().enumerate() {
+            *label = ((key >> (3 * index)) & 7) as u8;
+        }
+        Self {
+            labels,
+            old_left: key & (1 << 18) != 0,
+            phase: ((key >> 19) & 3) as u8,
+            chi: (key >> 21) as u8 as i8,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, Debug, Eq, PartialEq)]
@@ -122,18 +148,19 @@ fn placement_rows(width: usize, height: usize) -> Vec<Counts> {
             old_left: false,
             phase: 0,
             chi: 0,
-        },
+        }.packed(),
         1u64,
     );
     for index in 0..width * height {
         let col = index % width;
-        for (state, multiplicity) in states.drain() {
+        for (key, multiplicity) in states.drain() {
+            let state = State::unpack(key);
             for occupied in [false, true] {
                 if let Some(next) = transition(state, width, col, occupied) {
                     if next.phase == 2 {
                         closed.record(next.chi, multiplicity);
                     } else {
-                        *following.entry(next).or_insert(0) += multiplicity;
+                        *following.entry(next.packed()).or_insert(0) += multiplicity;
                     }
                 }
             }
@@ -148,9 +175,10 @@ fn placement_rows(width: usize, height: usize) -> Vec<Counts> {
     rows
 }
 
-fn summarize(states: &FxHashMap<State, u64>, width: usize) -> Counts {
+fn summarize(states: &FxHashMap<u32, u64>, width: usize) -> Counts {
     let mut result = Counts::default();
-    for (state, &multiplicity) in states {
+    for (&key, &multiplicity) in states {
+        let state = State::unpack(key);
         if state.phase != 0 {
             // 扫描结束时仍在前沿的不同标签代表不同分量。
             if state.labels[..width].iter().any(|&label| label > 1) {
@@ -325,6 +353,18 @@ mod reference;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_state_preserves_signed_chi_and_corner() {
+        for chi in i8::MIN..=i8::MAX {
+            for phase in 0..=2 {
+                for old_left in [false, true] {
+                    let state = State { labels: [1, 0, 2, 3, 4, 6], old_left, phase, chi };
+                    assert_eq!(State::unpack(state.packed()), state);
+                }
+            }
+        }
+    }
 
     #[test]
     fn every_row_snapshot_matches_frozen_reference_through_five() {

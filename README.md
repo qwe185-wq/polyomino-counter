@@ -1,4 +1,10 @@
-# room-count — 房间形状精确计数与导出
+# Polyomino Counter — 前沿转移状态压缩与有界计数优化
+
+**当前分支：`codex/jensen-20260926`。** 在前沿 DP 上复用相邻矩形扫描和转移缓冲区，压缩状态键，分离拓扑与欧拉特征累计，并吸收已确定有洞的历史。
+
+n=6 纯计数通过 32 MiB Windows Job 硬限制；导出仍使用 one-sided BFS 和外部 7-Zip。支持尺寸为 1..6。
+
+[分支导航与版本选择](docs/BRANCHES.md) · [GitHub 仓库](https://github.com/qwe185-wq/polyomino-counter) · [本分支技术依据](docs/jensen-optimization-2026-09-26.md)
 
 统计能嵌入 n×n 正方形网格的非空边连通格子集合。平移、旋转合并，镜像保持不同（one-sided polyomino）；分别统计总数、无洞和有洞。这里计的是形状，不区分门的位置或数量。洞按空格的四邻接可达性判断，对角缝隙不算通道。
 
@@ -8,6 +14,10 @@ Rust 主程序提供两条默认路线：
 - **导出：并行 one-sided BFS**，每个旋转等价类只保留一个最小位图代表。
 
 原 Fixed BFS 可显式选择，作为交叉验证和性能比较。旧 `jensen.rs`、`redelmeier.rs` 保留为历史实验源码，不再编入生产入口；旧 `--jensen` 参数调用新的正确 DP，`--dfs` 已移除。C 目录保留历史实现，不作为当前高性能入口。
+
+## 环境与版本选择
+
+需要 Rust/Cargo 工具链；Python 读取工具使用 Python 3.10+ 标准库。Rust 包和可执行文件名仍为 `room-count`。请先克隆仓库并切换到本文开头标明的分支，再按下方命令运行。完整分支获取命令见[分支导航](docs/BRANCHES.md)。n 是最大包围盒边长，不是形状包含的格子数。
 
 ## 构建与使用
 
@@ -38,7 +48,7 @@ cargo test --locked
 Windows 下需要有界运行时，先构建，再执行以下命令；脚本默认 n=5、512 MiB、30秒，n=6必须显式指定：
 
 ```powershell
-# 在 rust 目录内；已有本次 n=6 授权
+# 在 rust 目录内；显式选择 n=6，使用脚本的硬资源上限
 ./scripts/measure-transfer.ps1 -Exe ./target/release/room-count.exe -N 6 -MemoryMiB 32 -Runs 9
 ```
 

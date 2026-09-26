@@ -1,4 +1,10 @@
-# Rust 计数与导出
+# Polyomino Counter / Rust — 低内存完整形状导出与流式 ZIP
+
+**当前分支：`codex/export-20260926`。** 采用前沿状态图回溯及共享后缀可行性表逐条导出，引入 Redelmeier 参考路线、分类单份存储和原生流式 ZIP。
+
+支持尺寸为 1..6；n=6 的 410,964,612 条形状已做完整导出验收，裸数据通过逐条语义检查与磁盘分桶全键去重。该分支尚无 n>6 动态格式。
+
+[分支导航](../docs/BRANCHES.md) · [完整项目说明](../README.md)
 
 当前默认计数路线是 **前沿连通性 DP + 旋转轨道 + Burnside**；默认导出使用 **前沿状态图回溯**，每个形状仅写入所属分类。n 是必填参数，支持范围1..6。n=6完整裸导出已在128 MiB Job上限内通过，并逐条验收；普通回归与探针仍不枚举n=6。
 
@@ -13,7 +19,7 @@ cargo run --release -- 5 --export --no-compress --export-dir output_n5_raw
 cargo run --release -- 5 --export --export-dir output_n5_zip
 cargo test --release --locked
 
-# 已有本次 n=6 授权；32 MiB硬提交内存上限，默认30秒超时
+# 显式选择 n=6，使用脚本的硬资源上限；32 MiB硬提交内存上限，默认30秒超时
 ./scripts/measure-transfer.ps1 -Exe ./target/release/room-count.exe -N 6 -MemoryMiB 32
 
 # 完整导出：8线程，128 MiB硬上限，默认60秒超时，保留数据与日志

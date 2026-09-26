@@ -1,4 +1,10 @@
-# room-count — 房间形状精确计数与导出
+# Polyomino Counter — 低内存完整形状导出与流式 ZIP
+
+**当前分支：`codex/export-20260926`。** 采用前沿状态图回溯及共享后缀可行性表逐条导出，引入 Redelmeier 参考路线、分类单份存储和原生流式 ZIP。
+
+支持尺寸为 1..6；n=6 的 410,964,612 条形状已做完整导出验收，裸数据通过逐条语义检查与磁盘分桶全键去重。该分支尚无 n>6 动态格式。
+
+[分支导航与版本选择](docs/BRANCHES.md) · [GitHub 仓库](https://github.com/qwe185-wq/polyomino-counter) · [本分支技术依据](docs/export-optimization-2026-09-26.md)
 
 统计能嵌入 n×n 正方形网格的非空边连通格子集合。平移、旋转合并，镜像保持不同（one-sided polyomino）；分别统计总数、无洞和有洞。这里计的是形状，不区分门的位置或数量。洞按空格的四邻接可达性判断，对角缝隙不算通道。
 
@@ -8,6 +14,10 @@ Rust 主程序提供两条默认路线：
 - **导出：前沿状态图回溯（frontier）**，共享后缀可行性表，逐条生成最小旋转代表，不保存全局形状集合。
 
 `canonical`（one-sided BFS）、`bfs`（Fixed BFS）和新 `redelmeier` 可显式选择，作为交叉验证或低内存参考。旧 `jensen.rs`、`redelmeier.rs` 保留为历史实验源码，不再编入生产入口；新的 Redelmeier 实现在 `redelmeier_export.rs`。旧 `--jensen` 参数调用正确 DP，`--dfs` 已移除。C 目录保留历史实现。
+
+## 环境与版本选择
+
+需要 Rust/Cargo 工具链；Python 读取工具使用 Python 3.10+ 标准库。Rust 包和可执行文件名仍为 `room-count`。请先克隆仓库并切换到本文开头标明的分支，再按下方命令运行。完整分支获取命令见[分支导航](docs/BRANCHES.md)。n 是最大包围盒边长，不是形状包含的格子数。
 
 ## 构建与使用
 
@@ -41,7 +51,7 @@ cargo test --locked
 Windows 下需要有界运行时，先构建，再执行以下命令；脚本默认 n=5、512 MiB、30秒，n=6必须显式指定：
 
 ```powershell
-# 在 rust 目录内；已有本次 n=6 授权
+# 在 rust 目录内；显式选择 n=6，使用脚本的硬资源上限
 ./scripts/measure-transfer.ps1 -Exe ./target/release/room-count.exe -N 6 -MemoryMiB 32 -Runs 9
 
 # 完整裸导出，保留数据集与计时证据；默认8线程、128 MiB、60秒

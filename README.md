@@ -79,3 +79,10 @@ python read_shapes.py rust/output_n3_new/all_fixed.zip --ascii --limit 10
 | [CHANGELOG.md](CHANGELOG.md) | 早期迭代记录 |
 
 历史说明中的实验实现状态应结合当前分支源码阅读。原项目 README 标注许可为 MIT。
+
+## AI 辅助工具
+
+- **DeepSeek**
+- **OpenAI Codex**
+
+以上工具用于辅助项目开发与文档整理。项目由 [qwe185-wq](https://github.com/qwe185-wq) 维护；工具署名与 GitHub 根据提交记录生成的贡献者列表分别管理。

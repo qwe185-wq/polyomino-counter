@@ -15,6 +15,90 @@ fn counting_defaults_to_transfer() {
 }
 
 #[test]
+fn dynamic_cache_parallel_and_profile_preserve_categories() {
+    let dir = new_dir("count-cache");
+    let run = |n: &str, threads: &str| {
+        Command::new(env!("CARGO_BIN_EXE_room-count"))
+            .args([
+                n,
+                "--algorithm",
+                "transfer",
+                "--profile-count",
+                "--count-threads",
+                threads,
+                "--count-cache-dir",
+            ])
+            .arg(&dir)
+            .output()
+            .unwrap()
+    };
+    let first = run("4", "1");
+    let expanded = run("5", "3");
+    let warm = run("5", "3");
+    for output in [&first, &expanded, &warm] {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let rows = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .filter(|line| line.starts_with("n=") && line.contains("total="))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows(&expanded.stdout), rows(&warm.stdout));
+    assert_eq!(
+        rows(&expanded.stdout).last().unwrap(),
+        "n=5: total=520818, no_hole=267976, has_hole=252842"
+    );
+    let warm_log = String::from_utf8_lossy(&warm.stderr);
+    assert!(warm_log.contains("count_cache hit=identity"));
+    assert!(warm_log.contains("count_cache hit=symmetry"));
+    assert!(!warm_log.contains("count_stage phase=begin"));
+    // 只清理本测试创建的独立目录。
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn invalid_count_options_fail_before_enumeration() {
+    for arguments in [
+        vec!["1", "--count-threads", "0"],
+        vec!["1", "--count-memory-mib", "0"],
+        vec!["1", "--export", "--count-threads", "2"],
+        vec!["1", "--export", "--count-threads", "1"],
+        vec!["1", "--algorithm", "bfs", "--count-memory-mib", "4096"],
+        vec!["1", "--algorithm", "bfs", "--profile-count"],
+    ] {
+        assert!(!Command::new(env!("CARGO_BIN_EXE_room-count"))
+            .args(arguments)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+}
+
+#[test]
+fn explicit_symmetry_engines_agree_on_known_counts() {
+    for engine in ["frontier", "quotient", "gray"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_room-count"))
+            .args(["5", "--symmetry-engine", engine])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{engine}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .contains("n=5: total=520818, no_hole=267976, has_hole=252842"));
+    }
+}
+
+#[test]
 fn invalid_dimensions_are_rejected() {
     // 旧版本会将0静默改成1；从不传入会触发6的值。
     let output = Command::new(env!("CARGO_BIN_EXE_room-count"))

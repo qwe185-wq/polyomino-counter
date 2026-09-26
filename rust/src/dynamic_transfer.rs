@@ -1,9 +1,40 @@
 //! 无固定尺寸上限的前沿计数与旋转 Burnside 计数。
 
+use crate::count_cache::{CacheKind, CachedCounts, CountCache};
 use crate::dynamic::RoomCount;
 use num_bigint::BigUint;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::io::{Error, ErrorKind, Result};
+use std::path::PathBuf;
+use std::time::Instant;
+
+pub struct CountOptions {
+    pub cache_dir: Option<PathBuf>,
+    pub threads: usize,
+    pub memory_budget_bytes: u64,
+    pub symmetry_engine: SymmetryEngine,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+pub enum SymmetryEngine {
+    #[default]
+    Auto,
+    Frontier,
+    Quotient,
+    Gray,
+}
+
+impl Default for CountOptions {
+    fn default() -> Self {
+        Self {
+            cache_dir: None,
+            threads: 1,
+            memory_budget_bytes: 4 * 1024 * 1024 * 1024,
+            symmetry_engine: SymmetryEngine::Auto,
+        }
+    }
+}
 
 fn overflow(what: &str) -> Error {
     Error::new(
@@ -221,6 +252,11 @@ fn next_chi(chi: usize, phase: u8, delta: isize, width: usize) -> Result<usize> 
 }
 
 fn placement_rows(width: usize, height: usize) -> Result<Vec<Counts>> {
+    let profile = std::env::var_os("ROOM_COUNT_PROFILE").is_some();
+    let start = Instant::now();
+    if profile {
+        eprintln!("count_stage phase=begin engine=identity width={width} height={height}");
+    }
     let row_count = height.checked_add(1).ok_or_else(|| overflow("行数"))?;
     let area = width
         .checked_mul(height)
@@ -233,10 +269,15 @@ fn placement_rows(width: usize, height: usize) -> Result<Vec<Counts>> {
         return Ok(rows);
     }
     let nodes = topology_graph(width)?;
+    if profile {
+        eprintln!("count_stage phase=topology engine=identity width={width} height={height} nodes={} seconds={:.6}", nodes.len(), start.elapsed().as_secs_f64());
+    }
     let mut active: FxHashMap<(usize, usize), BigUint> = FxHashMap::default();
     active.insert((0, 0), BigUint::from(1u8));
     let mut closed = Counts::default();
     for index in 0..area {
+        let layer_start = profile.then(Instant::now);
+        let states_in = active.len();
         let mut following: FxHashMap<(usize, usize), BigUint> = FxHashMap::default();
         let capacity = active
             .len()
@@ -258,6 +299,9 @@ fn placement_rows(width: usize, height: usize) -> Result<Vec<Counts>> {
             }
         }
         active = following;
+        if let Some(layer_start) = layer_start {
+            eprintln!("identity_layer width={width} height={height} step={} states_in={states_in} states_out={} capacity={} seconds={:.6}", index + 1, active.len(), active.capacity(), layer_start.elapsed().as_secs_f64());
+        }
         if (index + 1) % width == 0 {
             let mut count = closed.clone();
             for (&(id, chi), multiplicity) in &active {
@@ -267,6 +311,12 @@ fn placement_rows(width: usize, height: usize) -> Result<Vec<Counts>> {
             }
             rows[(index + 1) / width] = count;
         }
+    }
+    if profile {
+        eprintln!(
+            "count_stage phase=end engine=identity width={width} height={height} seconds={:.6}",
+            start.elapsed().as_secs_f64()
+        );
     }
     Ok(rows)
 }
@@ -477,18 +527,71 @@ where
 }
 
 fn symmetric_bbox(width: usize, height: usize, quarter: bool) -> Result<Counts> {
+    symmetric_bbox_with_engine(width, height, quarter, SymmetryEngine::Auto)
+}
+
+fn symmetric_bbox_with_engine(
+    width: usize,
+    height: usize,
+    quarter: bool,
+    engine: SymmetryEngine,
+) -> Result<Counts> {
+    let profile = std::env::var_os("ROOM_COUNT_PROFILE").is_some();
+    let start = Instant::now();
+    if profile {
+        eprintln!("count_stage phase=begin engine=symmetry width={width} height={height} quarter={quarter}");
+    }
+    let result = symmetric_bbox_impl(width, height, quarter, engine);
+    if profile {
+        eprintln!("count_stage phase=end engine=symmetry width={width} height={height} quarter={quarter} seconds={:.6}", start.elapsed().as_secs_f64());
+    }
+    result
+}
+
+fn symmetric_bbox_impl(
+    width: usize,
+    height: usize,
+    quarter: bool,
+    engine: SymmetryEngine,
+) -> Result<Counts> {
     if width == 0 || height == 0 || (quarter && width != height) {
         return Ok(Counts::default());
     }
-    let area = width.checked_mul(height).ok_or_else(|| overflow("网格面积"))?;
-    let orbit_count = area.div_ceil(if quarter { 4 } else { 2 });
-    // 小轨道集的直接位运算更轻；大轨道集用前沿状态合并消除指数级重复。
-    // 这是算法选择阈值，不限制输入尺寸；n≤7 保持既有快速路径。
-    if (width > 7 || height > 7) && orbit_count > 25 {
-        let (no_hole, has_hole) = crate::symmetric_transfer::count_fixed(width, height, quarter)?;
+    // 同 bbox 有界对照：C2 的25轨道、C4 的9×9起前沿明显优于Gray；
+    // C4 8×8仍保留Gray。这是算法选择，不限制输入尺寸。
+    let selected = if engine == SymmetryEngine::Auto {
+        if auto_frontier(width, height, quarter)? {
+            SymmetryEngine::Frontier
+        } else {
+            SymmetryEngine::Gray
+        }
+    } else {
+        engine
+    };
+    if std::env::var_os("ROOM_COUNT_PROFILE").is_some() {
+        eprintln!(
+            "count_kernel width={width} height={height} quarter={quarter} selected={selected:?}"
+        );
+    }
+    if selected != SymmetryEngine::Gray {
+        let (no_hole, has_hole) = if engine == SymmetryEngine::Quotient {
+            crate::symmetric_quotient::count_fixed(width, height, quarter)?
+        } else {
+            crate::symmetric_transfer::count_fixed(width, height, quarter)?
+        };
         return Ok(Counts { no_hole, has_hole });
     }
     symmetric_bbox_gray(width, height, quarter)
+}
+
+pub(crate) fn probe_bbox(
+    width: usize,
+    height: usize,
+    quarter: bool,
+    engine: SymmetryEngine,
+) -> Result<(BigUint, BigUint)> {
+    let count = symmetric_bbox_with_engine(width, height, quarter, engine)?;
+    Ok((count.no_hole, count.has_hole))
 }
 
 fn symmetric_bbox_gray(width: usize, height: usize, quarter: bool) -> Result<Counts> {
@@ -633,12 +736,122 @@ fn burnside(fixed: &Counts, half: &Counts, quarter: &Counts) -> Result<Counts> {
 
 /// 返回 n=1..max_n 的 one-sided 累计结果；镜像保持不同。
 pub fn enumerate_transfer(max_n: usize, verbose: bool) -> Result<Vec<RoomCount>> {
+    enumerate_transfer_with_options(max_n, verbose, &CountOptions::default())
+}
+
+fn cached(
+    cache: Option<&CountCache>,
+    kind: CacheKind,
+    w: usize,
+    h: usize,
+) -> Result<Option<Counts>> {
+    match cache {
+        Some(cache) => Ok(cache.read(kind, w, h)?.map(|c| Counts {
+            no_hole: c.no_hole,
+            has_hole: c.has_hole,
+        })),
+        None => Ok(None),
+    }
+}
+
+fn save(cache: Option<&CountCache>, kind: CacheKind, w: usize, h: usize, c: &Counts) -> Result<()> {
+    if let Some(cache) = cache {
+        cache.write(
+            kind,
+            w,
+            h,
+            &CachedCounts {
+                no_hole: c.no_hole.clone(),
+                has_hole: c.has_hole.clone(),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn symmetric_cached(
+    cache: Option<&CountCache>,
+    w: usize,
+    h: usize,
+    quarter: bool,
+    engine: SymmetryEngine,
+) -> Result<Counts> {
+    let kind = if quarter {
+        CacheKind::Quarter
+    } else {
+        CacheKind::Half
+    };
+    if let Some(result) = cached(cache, kind, w, h)? {
+        if std::env::var_os("ROOM_COUNT_PROFILE").is_some() {
+            eprintln!("count_cache hit=symmetry width={w} height={h} quarter={quarter}");
+        }
+        return Ok(result);
+    }
+    let result = symmetric_bbox_with_engine(w, h, quarter, engine)?;
+    save(cache, kind, w, h, &result)?;
+    Ok(result)
+}
+
+// 仅并行已知空间为 O(area) 的 Gray 分项。未知峰值的大型 DP 独占预算，
+// 避免由线程数倍增两代状态表。该调度预算不冒充 OS 提交内存硬上限。
+fn small_gray_task(w: usize, h: usize, quarter: bool) -> bool {
+    auto_frontier(w, h, quarter).is_ok_and(|frontier| !frontier)
+}
+
+fn auto_frontier(w: usize, h: usize, quarter: bool) -> Result<bool> {
+    let area = w.checked_mul(h).ok_or_else(|| overflow("网格面积"))?;
+    Ok(if quarter {
+        area.div_ceil(4) > 16
+    } else {
+        area.div_ceil(2) >= 25
+    })
+}
+
+pub fn enumerate_transfer_with_options(
+    max_n: usize,
+    verbose: bool,
+    options: &CountOptions,
+) -> Result<Vec<RoomCount>> {
+    if options.threads == 0 || options.memory_budget_bytes == 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "线程数和调度内存预算必须为正数",
+        ));
+    }
     if max_n == 0 {
         return Err(Error::new(ErrorKind::InvalidInput, "n 必须为正整数"));
     }
     max_n
         .checked_mul(max_n)
         .ok_or_else(|| overflow("最大网格面积"))?;
+    let cache = options
+        .cache_dir
+        .as_deref()
+        .map(CountCache::new)
+        .transpose()?;
+    // 每个小任务预留 8 MiB，调度保留 64 MiB；大型 DP 始终串行。
+    let parallel_slots = options
+        .threads
+        .min(
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1),
+        )
+        .min(
+            usize::try_from(options.memory_budget_bytes.saturating_sub(64 << 20) / (8 << 20))
+                .unwrap_or(usize::MAX),
+        )
+        .max(1);
+    let pool = if parallel_slots > 1 && options.symmetry_engine == SymmetryEngine::Auto {
+        Some(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(parallel_slots)
+                .build()
+                .map_err(|e| Error::other(e.to_string()))?,
+        )
+    } else {
+        None
+    };
     let slots = max_n.checked_add(1).ok_or_else(|| overflow("尺寸数组"))?;
     let mut squares = Vec::new();
     squares
@@ -648,10 +861,40 @@ pub fn enumerate_transfer(max_n: usize, verbose: bool) -> Result<Vec<RoomCount>>
     let mut strips = squares.clone();
     for width in 1..=max_n {
         let height = if width < max_n { width + 1 } else { width };
+        let square = cached(cache.as_ref(), CacheKind::IdentityPlacement, width, width)?;
+        let strip = if height > width {
+            cached(cache.as_ref(), CacheKind::IdentityPlacement, width, height)?
+        } else {
+            None
+        };
+        if square.is_some() && (height == width || strip.is_some()) {
+            squares[width] = square.unwrap();
+            if let Some(strip) = strip {
+                strips[width + 1] = strip;
+            }
+            if std::env::var_os("ROOM_COUNT_PROFILE").is_some() {
+                eprintln!("count_cache hit=identity width={width} height={height}");
+            }
+            continue;
+        }
         let rows = placement_rows(width, height)?;
         squares[width] = rows[width].clone();
+        save(
+            cache.as_ref(),
+            CacheKind::IdentityPlacement,
+            width,
+            width,
+            &squares[width],
+        )?;
         if width < max_n {
             strips[width + 1] = rows[width + 1].clone();
+            save(
+                cache.as_ref(),
+                CacheKind::IdentityPlacement,
+                width,
+                height,
+                &strips[width + 1],
+            )?;
         }
     }
     let mut previous = Counts::default();
@@ -664,13 +907,43 @@ pub fn enumerate_transfer(max_n: usize, verbose: bool) -> Result<Vec<RoomCount>>
     for n in 1..=max_n {
         let fixed = difference(&squares[n], &previous, &strips[n])?;
         previous = squares[n].clone();
+        let mut counts: Vec<Option<Counts>> = vec![None; n + 1];
+        if let Some(pool) = &pool {
+            let tasks: Vec<_> = (1..=n).filter(|&w| small_gray_task(w, n, false)).collect();
+            let completed: Vec<Result<(usize, Counts)>> = pool.install(|| {
+                tasks
+                    .par_iter()
+                    .map(|&w| {
+                        symmetric_cached(cache.as_ref(), w, n, false, options.symmetry_engine)
+                            .map(|c| (w, c))
+                    })
+                    .collect()
+            });
+            for result in completed {
+                let (w, count) = result?;
+                counts[w] = Some(count);
+            }
+        }
         for width in 1..n {
-            let count = symmetric_bbox(width, n, false)?;
+            let count = match counts[width].take() {
+                Some(count) => count,
+                None => symmetric_cached(cache.as_ref(), width, n, false, options.symmetry_engine)?,
+            };
             sym180.add(&count);
             sym180.add(&count);
         }
-        sym180.add(&symmetric_bbox(n, n, false)?);
-        sym90.add(&symmetric_bbox(n, n, true)?);
+        let square_half = match counts[n].take() {
+            Some(count) => count,
+            None => symmetric_cached(cache.as_ref(), n, n, false, options.symmetry_engine)?,
+        };
+        sym180.add(&square_half);
+        sym90.add(&symmetric_cached(
+            cache.as_ref(),
+            n,
+            n,
+            true,
+            options.symmetry_engine,
+        )?);
         let orbit_count = burnside(&fixed, &sym180, &sym90)?;
         let count = RoomCount {
             n,

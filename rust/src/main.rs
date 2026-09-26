@@ -3,6 +3,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod bit_utils;
 mod burnside;
+mod count_cache;
 mod dynamic;
 mod dynamic_bitset;
 mod dynamic_export;
@@ -14,6 +15,7 @@ mod frontier_export;
 mod hashset;
 mod redelmeier_export;
 mod symmetric;
+mod symmetric_quotient;
 mod symmetric_transfer;
 mod transfer;
 mod types;
@@ -59,6 +61,21 @@ struct Args {
     n: usize,
     #[arg(short, long)]
     verbose: bool,
+    /// 输出纯计数的分阶段/逐层统计到 stderr
+    #[arg(long, conflicts_with = "export")]
+    profile_count: bool,
+    /// 复用已完成的精确计数分项；不保存未完成的前沿状态
+    #[arg(long, conflicts_with = "export")]
+    count_cache_dir: Option<PathBuf>,
+    /// 小内存计数分项的并行线程数；大型 DP 单独运行
+    #[arg(long, conflicts_with = "export")]
+    count_threads: Option<usize>,
+    /// 并行调度的总内存预算 MiB（硬限制由外部运行器执行）
+    #[arg(long, conflicts_with = "export")]
+    count_memory_mib: Option<u64>,
+    /// 对称固定集内核：auto 自动选择；frontier/quotient 用于对照
+    #[arg(long, value_enum, conflicts_with = "export")]
+    symmetry_engine: Option<dynamic_transfer::SymmetryEngine>,
     /// auto：纯计数使用前沿DP，导出使用前沿状态图回溯
     #[arg(long, value_enum, default_value = "auto")]
     algorithm: Algorithm,
@@ -83,7 +100,29 @@ struct Args {
 }
 
 fn run(args: Args) -> io::Result<()> {
-    if args.n > MAX_N {
+    if args.count_threads == Some(0) || args.count_memory_mib == Some(0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "计数线程数和内存预算必须为正数",
+        ));
+    }
+    let count_options = args.profile_count
+        || args.count_cache_dir.is_some()
+        || args.count_threads.is_some()
+        || args.count_memory_mib.is_some()
+        || args.symmetry_engine.is_some();
+    if count_options
+        && (args.export || !matches!(args.algorithm, Algorithm::Auto | Algorithm::Transfer))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "计数选项只支持纯计数 auto/transfer",
+        ));
+    }
+    if args.profile_count {
+        std::env::set_var("ROOM_COUNT_PROFILE", "1");
+    }
+    if args.n > MAX_N || count_options {
         return run_dynamic(args);
     }
     let total_start = Instant::now();
@@ -236,7 +275,20 @@ fn run_dynamic(args: Args) -> io::Result<()> {
     println!("多联骨牌房间计数 — {title}\nn={}", args.n);
     let compute_start = Instant::now();
     let results = if algorithm == Algorithm::Transfer {
-        dynamic_transfer::enumerate_transfer(args.n, args.verbose)?
+        dynamic_transfer::enumerate_transfer_with_options(
+            args.n,
+            args.verbose,
+            &dynamic_transfer::CountOptions {
+                cache_dir: args.count_cache_dir.clone(),
+                symmetry_engine: args.symmetry_engine.unwrap_or_default(),
+                threads: args.count_threads.unwrap_or(1),
+                memory_budget_bytes: args
+                    .count_memory_mib
+                    .unwrap_or(4096)
+                    .checked_mul(1024 * 1024)
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "内存预算溢出"))?,
+            },
+        )?
     } else {
         dynamic_frontier::enumerate_frontier(args.n, args.verbose, &mut |mask, md, hole| {
             if let Some(output) = &mut output {

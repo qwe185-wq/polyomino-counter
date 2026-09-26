@@ -26,6 +26,7 @@ impl State {
             | ((self.chi as u8 as u32) << 21)
     }
 
+    #[cfg(test)]
     fn unpack(key: u32) -> Self {
         let mut labels = [0; MAX_N];
         for (index, label) in labels.iter_mut().enumerate() {
@@ -190,8 +191,18 @@ fn topology_graph(width: usize) -> Vec<Node> {
     nodes
 }
 
-const CHI_OFFSET: i32 = (MAX_N * MAX_N) as i32;
-const CHI_BINS: usize = 2 * MAX_N * MAX_N + 1;
+// 逐行扫描的未处理后缀始终连通到板外，已形成的洞无法再被填掉。
+// 非空前缀 χ≤0 已证明有洞，合并为吸收桶0；空前缀由 phase=0 区分。
+// 对其余前缀 χ=c8-h≤c4≤前沿宽度：每个四连通组件都必须仍在前沿。
+const CHI_BINS: usize = MAX_N + 1;
+
+fn next_chi_bin(chi: usize, phase: u8, delta: i8) -> usize {
+    if phase != 0 && chi == 0 {
+        0
+    } else {
+        (chi as i8 + delta).max(0) as usize
+    }
+}
 
 // 每一行末读取 C(w,h)，不终止仍可向下一行生长的前沿。
 fn placement_rows(width: usize, height: usize) -> Vec<Counts> {
@@ -202,23 +213,23 @@ fn placement_rows(width: usize, height: usize) -> Vec<Counts> {
     let nodes = topology_graph(width);
     let mut counts = vec![0u64; nodes.len() * CHI_BINS];
     let mut following = vec![0u64; counts.len()];
-    counts[CHI_OFFSET as usize] = 1;
-    let mut active = vec![CHI_OFFSET as usize];
+    counts[0] = 1;
+    let mut active = vec![0];
     let mut next_active = Vec::new();
     let mut closed = Counts::default();
     for index in 0..width * height {
         for slot in active.drain(..) {
             let multiplicity = std::mem::take(&mut counts[slot]);
             let id = slot / CHI_BINS;
-            let chi = (slot % CHI_BINS) as i32 - CHI_OFFSET;
+            let chi = slot % CHI_BINS;
             for edge in nodes[id].edges {
                 match edge {
                     Edge::Invalid => (),
                     Edge::Closed => closed.record(chi as i8, multiplicity),
                     Edge::Next { id, delta } => {
-                        let next_chi = chi + delta as i32;
-                        debug_assert!((-CHI_OFFSET..=CHI_OFFSET).contains(&next_chi));
-                        let target = id * CHI_BINS + (next_chi + CHI_OFFSET) as usize;
+                        let next_chi = next_chi_bin(chi, nodes[slot / CHI_BINS].state.phase, delta);
+                        debug_assert!(next_chi < CHI_BINS);
+                        let target = id * CHI_BINS + next_chi;
                         if following[target] == 0 {
                             next_active.push(target);
                         }
@@ -233,7 +244,7 @@ fn placement_rows(width: usize, height: usize) -> Vec<Counts> {
             let mut count = closed;
             for &slot in &active {
                 if nodes[slot / CHI_BINS].accepts {
-                    let chi = (slot % CHI_BINS) as i32 - CHI_OFFSET;
+                    let chi = slot % CHI_BINS;
                     count.record(chi as i8, counts[slot]);
                 }
             }
@@ -406,6 +417,18 @@ mod reference;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hole_absorption_distinguishes_empty_prefix_and_positive_chi() {
+        assert_eq!(next_chi_bin(0, 0, 1), 1);
+        assert_eq!(next_chi_bin(0, 1, 1), 0);
+        assert_eq!(next_chi_bin(2, 1, -1), 1);
+        assert_eq!(next_chi_bin(1, 1, -2), 0);
+        // 宽3高5有多个已封闭洞的历史，全部行快照仍与精确χ参考一致。
+        for (height, count) in placement_rows(3, 5).iter().enumerate().skip(1) {
+            assert_eq!((count.no_hole, count.has_hole), reference::placements_for_test(3, height));
+        }
+    }
 
     #[test]
     fn packed_state_preserves_signed_chi_and_corner() {

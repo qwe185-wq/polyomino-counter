@@ -6,7 +6,7 @@ mod types;
 fn main() {
     // 探针不提供默认的大规模计算入口。
     let start = std::time::Instant::now();
-    let results = transfer::enumerate_transfer(5, false);
+    let results = std::hint::black_box(transfer::enumerate_transfer(5, false));
     let elapsed = start.elapsed();
     for result in results {
         println!("{result}");

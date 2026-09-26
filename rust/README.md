@@ -32,4 +32,12 @@ cargo test --release --locked
 
 `read_shapes.py` 可直接读取数据集根目录，按 `dataset.json` 中的 `streams` 顺序拼接逻辑全集；旧v1、ZIP和bin输入仍兼容。
 
+中心商图的第二轮研究与实验见[商图及抽象结构调研](../docs/fixedset-round2-2026-09-26.md)。显式选择 `--symmetry-engine quotient` 或运行 `quotient_probe` 时，可用环境变量 `ROOM_COUNT_QUOTIENT_MODE` 比较四种精确计数模式：`split`（默认，原中心图案分支）、`single`（不拆中心的单遍商图）、`two`（偶×偶半转拆中心全空/非空）、`center`（偶×偶半转拆中心全满/不全满，后者利用永久洞证明省χ）。其他尺寸下 `two/center` 沿用原两分支；这些模式只影响显式商图内核，自动内核选择不变。
+
+```powershell
+$env:ROOM_COUNT_QUOTIENT_MODE='single'
+./target/release/quotient_probe.exe 12 12 half
+Remove-Item Env:ROOM_COUNT_QUOTIENT_MODE
+```
+
 n>6使用v3清单（`uint-le-fixed`、动态`stride/record_bytes`、十进制字符串计数、ZIP64）。已实测n=7总数1,185,652,433,093，与旧参考DP一致；n=8纯计数总数12,575,973,909,316,634，优化前后分类一致。本轮600秒/4GiB受控测试中n=13用122.40秒完成，n=14触发内存限制未完成；结果及新选项见[分阶段优化记录](../docs/fixedset-performance-2026-09-26.md)。n≥7全集导出仍未完成验证。大轨道集改用保留原格连通标签的DP，小轨道集沿用Gray位运算；超过单字宽度的通用位图内核使用动态`Vec<u64>`，不设小尺寸上限。边界与早期验证详见[动态尺寸记录](../docs/dynamic-dimensions-2026-09-26.md)，历史位运算改进见[大尺寸计数优化](../docs/large-count-optimization-2026-09-26.md)，最新算法、调研取舍与性能见[旋转固定集优化](../docs/symmetric-fixedset-optimization-2026-09-26.md)。旧参考算法 `bfs/canonical/redelmeier` 与历史有界基准脚本仍只处理n≤6；动态入口使用 `auto/transfer/frontier`，不套用资源限制。

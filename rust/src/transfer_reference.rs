@@ -97,12 +97,11 @@ fn transition(state: State, width: usize, col: usize, occupied: bool) -> Option<
     Some(next)
 }
 
-// 每一行末读取 C(w,h)，不终止仍可向下一行生长的前沿。
-fn placement_rows(width: usize, height: usize) -> Vec<Counts> {
+// C(w,h)：板内所有非空、四邻接连通放置，按有无洞分类。
+fn connected_placements(width: usize, height: usize) -> Counts {
     if width == 0 || height == 0 {
-        return vec![Counts::default(); height + 1];
+        return Counts::default();
     }
-    let mut rows = vec![Counts::default(); height + 1];
     let mut states = FxHashMap::default();
     states.insert(
         State {
@@ -124,16 +123,9 @@ fn placement_rows(width: usize, height: usize) -> Vec<Counts> {
             }
         }
         states = following;
-        if col + 1 == width {
-            rows[index / width + 1] = summarize(&states, width);
-        }
     }
-    rows
-}
-
-fn summarize(states: &FxHashMap<State, u64>, width: usize) -> Counts {
     let mut result = Counts::default();
-    for (state, &multiplicity) in states {
+    for (state, multiplicity) in states {
         if state.phase != 0 {
             // 扫描结束时仍在前沿的不同标签代表不同分量。
             if state.labels[..width].iter().any(|&label| label > 1) {
@@ -148,11 +140,6 @@ fn summarize(states: &FxHashMap<State, u64>, width: usize) -> Counts {
         }
     }
     result
-}
-
-#[cfg(test)]
-fn connected_placements(width: usize, height: usize) -> Counts {
-    placement_rows(width, height)[height]
 }
 
 fn connected(mask: u64, _width: usize, _height: usize) -> bool {
@@ -258,20 +245,10 @@ pub fn enumerate_transfer(max_n: usize, verbose: bool) -> Vec<RoomCount> {
     let mut sym180 = Counts::default();
     let mut sym90 = Counts::default();
     let mut result = Vec::with_capacity(max_n);
-    let mut squares = [Counts::default(); MAX_N + 1];
-    let mut strips = [Counts::default(); MAX_N + 1];
-    for width in 1..=max_n {
-        let height = (width + 1).min(max_n);
-        let rows = placement_rows(width, height);
-        squares[width] = rows[width];
-        if width < max_n {
-            strips[width + 1] = rows[width + 1];
-        }
-    }
     for n in 1..=max_n {
         // C(w,h)=C(h,w)，故二维差分只需当前正方形、相邻窄矩形和前一正方形。
-        let square = squares[n];
-        let strip = strips[n];
+        let square = connected_placements(n, n);
+        let strip = connected_placements(n - 1, n);
         let fixed = Counts {
             no_hole: square.no_hole + previous_square.no_hole - 2 * strip.no_hole,
             has_hole: square.has_hole + previous_square.has_hole - 2 * strip.has_hole,
@@ -306,182 +283,8 @@ pub fn enumerate_transfer(max_n: usize, verbose: bool) -> Vec<RoomCount> {
     result
 }
 
-#[cfg(test)]
-#[path = "transfer_reference.rs"]
-mod reference;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_row_snapshot_matches_frozen_reference_through_five() {
-        for width in 1..=5 {
-            let rows = placement_rows(width, 5);
-            for height in 1..=5 {
-                let expected = reference::placements_for_test(width, height);
-                assert_eq!((rows[height].no_hole, rows[height].has_hole), expected,
-                    "board={width}x{height}");
-            }
-        }
-        let actual = enumerate_transfer(5, false);
-        let expected = reference::enumerate_transfer(5, false);
-        for (a, e) in actual.iter().zip(expected.iter()) {
-            assert_eq!((a.total, a.no_hole, a.has_hole), (e.total, e.no_hole, e.has_hole));
-        }
-    }
-
-    // 独立 oracle：紧凑逐格位图、前景四邻接洪泛、背景加一圈后四邻接洪泛。
-    fn brute_placements(width: usize, height: usize) -> Counts {
-        let area = width * height;
-        let mut result = Counts::default();
-        for mask in 1u32..(1u32 << area) {
-            let mut reached = 0u32;
-            let start = mask.trailing_zeros() as usize;
-            let mut stack = vec![start];
-            while let Some(cell) = stack.pop() {
-                let bit = 1u32 << cell;
-                if reached & bit != 0 {
-                    continue;
-                }
-                reached |= bit;
-                let row = cell / width;
-                let col = cell % width;
-                if row > 0 && mask & (bit >> width) != 0 {
-                    stack.push(cell - width);
-                }
-                if row + 1 < height && mask & (bit << width) != 0 {
-                    stack.push(cell + width);
-                }
-                if col > 0 && mask & (bit >> 1) != 0 {
-                    stack.push(cell - 1);
-                }
-                if col + 1 < width && mask & (bit << 1) != 0 {
-                    stack.push(cell + 1);
-                }
-            }
-            if reached != mask {
-                continue;
-            }
-
-            let outer_width = width + 2;
-            let outer_height = height + 2;
-            let mut background_seen = vec![false; outer_width * outer_height];
-            let mut outside = vec![0usize];
-            while let Some(cell) = outside.pop() {
-                if background_seen[cell] {
-                    continue;
-                }
-                background_seen[cell] = true;
-                let row = cell / outer_width;
-                let col = cell % outer_width;
-                let neighbors = [
-                    row.checked_sub(1).map(|r| (r, col)),
-                    (row + 1 < outer_height).then_some((row + 1, col)),
-                    col.checked_sub(1).map(|c| (row, c)),
-                    (col + 1 < outer_width).then_some((row, col + 1)),
-                ];
-                for (r, c) in neighbors.into_iter().flatten() {
-                    if r > 0
-                        && r <= height
-                        && c > 0
-                        && c <= width
-                        && mask & (1u32 << ((r - 1) * width + c - 1)) != 0
-                    {
-                        continue;
-                    }
-                    let neighbor = r * outer_width + c;
-                    if !background_seen[neighbor] {
-                        outside.push(neighbor);
-                    }
-                }
-            }
-            let mut hole = false;
-            for row in 0..height {
-                for col in 0..width {
-                    let bit = 1u32 << (row * width + col);
-                    if mask & bit == 0 && !background_seen[(row + 1) * outer_width + col + 1] {
-                        hole = true;
-                    }
-                }
-            }
-            if hole {
-                result.has_hole += 1;
-            } else {
-                result.no_hole += 1;
-            }
-        }
-        result
-    }
-
-    #[test]
-    fn every_board_through_four_matches_independent_flood_fill() {
-        for width in 1..=4 {
-            for height in 1..=4 {
-                assert_eq!(
-                    connected_placements(width, height),
-                    brute_placements(width, height),
-                    "board={width}x{height}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn empty_prefix_and_missing_corner_remain_valid() {
-        assert_eq!(
-            connected_placements(2, 2),
-            Counts {
-                no_hole: 13,
-                has_hole: 0
-            }
-        );
-        assert_eq!(connected_placements(3, 3), brute_placements(3, 3));
-    }
-
-    #[test]
-    fn rotation_orbits_match_direct_subset_rotation_through_four() {
-        for width in 1..=4 {
-            for height in 1..=4 {
-                for quarter_turn in [false, true] {
-                    if quarter_turn && width != height {
-                        continue;
-                    }
-                    let mut expected = Counts::default();
-                    for subset in 1u32..(1u32 << (width * height)) {
-                        let mut mask = 0u64;
-                        let mut rotated = 0u64;
-                        for row in 0..height {
-                            for col in 0..width {
-                                if subset & (1u32 << (row * width + col)) != 0 {
-                                    mask |= 1u64 << (row * 8 + col);
-                                    let (new_row, new_col) = if quarter_turn {
-                                        (col, width - row - 1)
-                                    } else {
-                                        (height - row - 1, width - col - 1)
-                                    };
-                                    rotated |= 1u64 << (new_row * 8 + new_col);
-                                }
-                            }
-                        }
-                        if mask == rotated
-                            && full_bounding_box(mask, boundary_masks(width, height))
-                            && connected(mask, width, height)
-                        {
-                            if has_hole(mask) {
-                                expected.has_hole += 1;
-                            } else {
-                                expected.no_hole += 1;
-                            }
-                        }
-                    }
-                    assert_eq!(
-                        symmetric_bbox(width, height, quarter_turn),
-                        expected,
-                        "board={width}x{height}, quarter_turn={quarter_turn}"
-                    );
-                }
-            }
-        }
-    }
+// 固定基线：仅用于测试，与生产优化实现独立演化。
+pub fn placements_for_test(width: usize, height: usize) -> (u64, u64) {
+    let result = connected_placements(width, height);
+    (result.no_hole, result.has_hole)
 }
